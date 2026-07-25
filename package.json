@@ -1,0 +1,26 @@
+{
+  "name": "today-we-are",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "svg:import": "node scripts/import-figma-svg.mjs",
+    "svg:verify": "node scripts/verify-svg.mjs",
+    "svg:verify-ui": "node scripts/verify-ui-svg.mjs",
+    "svg:verify-usage": "node scripts/verify-svg-usage.mjs",
+    "ui:verify-responsive": "node scripts/verify-responsive-canvas.mjs",
+    "figma:screens": "node scripts/render-figma-screens.mjs"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.6.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.5.0",
+    "vite": "^7.0.0"
+  }
+}

@@ -1,0 +1,112 @@
+/* 폰트: GangwonEduHyeonokT(강원교육현옥체) — 눈누 웹폰트 (프로토타입과 동일 소스) */
+@font-face {
+  font-family: 'GangwonEduHyeonokT';
+  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_2201-2@1.0/GangwonEduHyeonokT_OTFMediumA.woff') format('woff'),
+    url('https://cdn.jsdelivr.net/gh/fontbee/font@main/Gwe/GangwonEduHyeonokT_OTFMediumA.woff') format('woff');
+  font-weight: 400;
+  font-display: swap;
+}
+
+/* 색/폰트 값은 src/styles/tokens.js 단일 소스 — App이 :root 인라인 CSS 변수(--c-*, --font-*)로 주입 */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--c-stage, #e9e2d5);
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+a {
+  color: var(--c-olive);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--c-olive-hover);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  outline: none;
+  padding: 0;
+  margin: 0;
+}
+
+/* 스테이지(폰 프레임 바깥) */
+.stage {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* 402×874 모바일 캔버스 */
+.phone {
+  position: relative;
+  width: 402px;
+  height: 874px;
+  border-radius: 28px;
+  overflow: hidden;
+  background: var(--c-bg);
+  outline: 1px solid rgba(110, 102, 94, 0.14);
+  font-family: var(--font-hand);
+  transform-origin: top left;
+}
+
+/* 모바일 실기기: 프레임 없이 화면 폭에 맞춰 스케일 (App에서 transform 적용) */
+.stage.is-mobile {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  min-height: 0;
+  padding: 0;
+  align-items: flex-start;
+  overflow: hidden;
+}
+.stage.is-mobile .phone {
+  border-radius: 0;
+  outline: none;
+}
+
+/* 화면 전환 (프로토타입: opacity + translateX(24px), 0.32s ease) */
+.screen-host {
+  position: absolute;
+  inset: 0;
+  animation: screen-in 0.32s ease;
+}
+@keyframes screen-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* 캐러셀 스크롤바 숨김 */
+.pt-carousel {
+  scrollbar-width: none;
+}
+.pt-carousel::-webkit-scrollbar {
+  display: none;
+}
+
+.sheet-scroll {
+  scrollbar-width: none;
+}
+.sheet-scroll::-webkit-scrollbar {
+  display: none;
+}

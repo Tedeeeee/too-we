@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.vite/
+
+.env
+.env.*
+!.env.example
+*.local
+
+# Figma 개인 액세스 토큰 (파일로만 두고 커밋 금지)
+.figma-token
+*.token
+
+.DS_Store
+Thumbs.db
+
+# Figma 렌더 (스크립트로 언제든 재생성)
+.figma-renders/
