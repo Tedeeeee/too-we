@@ -10,4 +10,9 @@ export default defineConfig({
       '@assets': fileURLToPath(new URL('./design-assets', import.meta.url)),
     },
   },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: './src/test/setup.js',
+  },
 });
