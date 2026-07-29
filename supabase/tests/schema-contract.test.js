@@ -28,8 +28,10 @@ import {
   policies,
   policiesFor,
   rawSql,
+  readSqlTest,
   revokes,
   rlsEnabledTables,
+  splitTopLevel,
   sqlTestFiles,
   statements,
   tableColumns,
@@ -77,6 +79,11 @@ const REQUIRED_ERROR_CODES = [
   'couple_capacity_reached',
   'active_membership_conflict',
   'photo_limit_reached',
+  // An operating value that was never agreed at the external gate must stop the
+  // flow with its own name, not fall back to an invented default.
+  'config_unresolved',
+  // A purge job whose work is not fully recorded must not be closed.
+  'purge_incomplete',
 ];
 
 const USER_RPCS = [
@@ -253,6 +260,67 @@ describe('invite codes', () => {
       expect(fn.body).not.toMatch(/interval\s+'[^']*(day|hour|minute|week)/i);
     }
   });
+
+  /* -- fail closed on an unconfigured lifetime ---------------------------- */
+
+  it('cannot store a code without an expiry', () => {
+    expect(tableColumns('public.couple_invites').get('expires_at')).toMatch(/not\s+null/i);
+  });
+
+  it('rejects a missing, unresolved, zero or negative lifetime by name', () => {
+    const guard = functions().find((f) => /require_config_seconds/i.test(f.name));
+    expect(guard, 'no configuration guard helper').toBeDefined();
+    expect(guard.body).toMatch(/config_unresolved/);
+    // Each rejected shape has to be distinguishable in the raised detail.
+    for (const reason of ['missing', 'unresolved', 'not_a_number', 'not_positive']) {
+      expect(guard.body, `${reason} not handled`).toContain(`'${reason}'`);
+    }
+    expect(guard.body).toMatch(/\bresolved\b/);
+    expect(guard.body).toMatch(/<=\s*0|<\s*1/);
+  });
+
+  it('refuses to issue before it revokes or inserts anything', () => {
+    const [issuer] = functionsNamed('app.issue_invite');
+    expect(issuer).toBeDefined();
+    expect(issuer.body).toMatch(/require_config_seconds/);
+    // Order matters: a failed configuration check must not have already revoked
+    // the couple's working code.
+    const check = issuer.body.search(/require_config_seconds/);
+    const revoke = issuer.body.search(/'revoked'/);
+    const insert = issuer.body.search(/insert\s+into\s+public\.couple_invites/i);
+    expect(check).toBeGreaterThan(-1);
+    expect(revoke).toBeGreaterThan(check);
+    expect(insert).toBeGreaterThan(check);
+    // No conditional fallback that would leave expires_at null.
+    expect(issuer.body).not.toMatch(/if\s+v_ttl\s+is\s+not\s+null/i);
+  });
+
+  it('never invents a lifetime in the production seed', () => {
+    const seed = inserts().find((i) => i.table === 'app.config');
+    expect(seed.code).toMatch(/'invite_ttl_seconds'\s*,\s*null\s*,\s*false/i);
+  });
+
+  it('stops advertising an unresolved ttl that can no longer happen', () => {
+    const [json] = functionsNamed('app.invite_public_json');
+    expect(json).toBeDefined();
+    expect(json.body).not.toMatch(/ttl_unresolved/);
+  });
+
+  it('keeps expiry distinguishable from revocation on a repeated attempt', () => {
+    // A repeated attempt on the same code has to still say "expired". Folding
+    // expiry into the revoked status would answer invite_revoked the second time.
+    expect(tableSql('public.couple_invites')).toMatch(/'expired'/);
+    expect(tableColumns('public.couple_invites').has('expired_at')).toBe(true);
+
+    const [join] = functionsNamed('public.join_couple_with_code');
+    expect(join.body).toMatch(/set\s+status\s*=\s*'expired'/i);
+    expect(join.body).not.toMatch(/expires_at[\s\S]{0,80}status\s*=\s*'revoked'/i);
+    // The lookup branch that runs when no active row matched must fork three ways.
+    const fallback = join.body.slice(join.body.search(/order\s+by\s+created_at\s+desc/i));
+    for (const code of ['invite_consumed', 'invite_expired', 'invite_revoked']) {
+      expect(fallback, `${code} unreachable on a repeated attempt`).toContain(code);
+    }
+  });
 });
 
 describe('visits carry the Kakao place snapshot', () => {
@@ -278,6 +346,51 @@ describe('visits carry the Kakao place snapshot', () => {
       expect(cols.has(col)).toBe(true);
     }
     expect(cols.get('place_snapshot')).toMatch(/jsonb/i);
+  });
+});
+
+describe('a new visit starts genuinely empty', () => {
+  it('accepts only the place snapshot, the time and the request key', () => {
+    const [create] = functionsNamed('public.create_visit');
+    expect(create).toBeDefined();
+    const params = splitTopLevel(create.args, ',').map((p) => p.trim());
+    expect(params.length, `create_visit takes ${params.length} parameters`).toBe(3);
+    expect(params[0]).toMatch(/^p_place\s+jsonb$/i);
+    expect(params[1]).toMatch(/^p_visited_at\s+timestamptz$/i);
+    // Mandatory: no default, so a caller cannot skip the idempotency boundary.
+    expect(params[2]).toMatch(/^p_request_key\s+text$/i);
+    expect(create.args).not.toMatch(/p_flower_key|p_tags/i);
+  });
+
+  it('creates no flower and no tag of its own', () => {
+    const [create] = functionsNamed('public.create_visit');
+    expect(create.body).not.toMatch(/flower_key/i);
+    expect(create.body).not.toMatch(/visit_tags/i);
+    expect(create.body).not.toMatch(/\bforeach\b/i);
+  });
+
+  it('leaves the shared flower nullable so it can be chosen later', () => {
+    expect(tableColumns('public.visits').get('flower_key')).not.toMatch(/not\s+null/i);
+  });
+
+  it('gives a client no way to insert a visit around the RPC', () => {
+    expect(
+      policiesFor('public.visits', 'insert').filter((p) => p.command === 'insert').length,
+      'a direct insert policy would bypass the idempotency boundary',
+    ).toBe(0);
+    for (const grant of grants()) {
+      if (!/\btable\s+public\.visits\b/i.test(grant.code)) continue;
+      expect(grant.code, 'insert on visits must not be granted').not.toMatch(/\binsert\b/i);
+    }
+  });
+
+  it('still lets both members update the visit and set tags through the RPC', () => {
+    expect(policiesFor('public.visits', 'update').length).toBeGreaterThan(0);
+    expect(functionsNamed('public.set_visit_tags').length).toBe(1);
+    const tagGrant = grants().some(
+      (g) => g.code.includes('public.set_visit_tags') && g.roles.includes('authenticated'),
+    );
+    expect(tagGrant).toBe(true);
   });
 });
 
@@ -386,18 +499,22 @@ describe('visit photos', () => {
     expect(bucket.code).not.toMatch(/image\//i);
   });
 
-  it('protects the photo identity columns from the other member', () => {
+  it('keeps a generic immutable column guard for the other shared tables', () => {
     const guard = functions().find((f) => /guard_immutable_columns/i.test(f.name));
     expect(guard).toBeDefined();
-    const trigger = statements().find(
-      (st) =>
-        /create\s+trigger/i.test(st.code) &&
-        /public\.visit_photos/i.test(st.code) &&
-        /guard_immutable_columns/i.test(st.code),
-    );
-    expect(trigger).toBeDefined();
-    expect(trigger.code).toMatch(/storage_path/);
-    expect(trigger.code).toMatch(/uploader_id/);
+    for (const [table, column] of [
+      ['public.visits', 'couple_id'],
+      ['public.visit_entries', 'author_id'],
+    ]) {
+      const trigger = statements().find(
+        (st) =>
+          /create\s+trigger/i.test(st.code) &&
+          new RegExp(`before\\s+update\\s+on\\s+${table}\\b`, 'i').test(st.code) &&
+          /guard_immutable_columns/i.test(st.code),
+      );
+      expect(trigger, `${table} has no immutable column guard`).toBeDefined();
+      expect(trigger.code).toContain(column);
+    }
   });
 });
 
@@ -485,6 +602,151 @@ describe('disconnect and purge', () => {
     expect(helper).toBeDefined();
     expect(helper.body).toMatch(/status\s*=\s*'active'/i);
     expect(helper.body).toMatch(/left_at\s+is\s+null/i);
+  });
+
+  it('makes a queued job eligible immediately, not at its due date', () => {
+    const [claim] = functionsNamed('public.claim_purge_jobs');
+    expect(claim).toBeDefined();
+    expect(claim.body).toMatch(/status\s*=\s*'queued'/i);
+    // due_at is the completion target, never a gate on picking the job up.
+    expect(claim.body).not.toMatch(/due_at\s*(<|<=|>|>=)/);
+  });
+
+  /* -- a purge must not reach past the couple it belongs to ---------------- */
+
+  it('touches nothing that outlives the disconnected couple', () => {
+    const [purge] = functionsNamed('public.purge_couple_data');
+    expect(purge).toBeDefined();
+    // Either user may already have a new couple by the time the job runs.
+    expect(purge.body, 'a personal profile name is not couple data').not.toMatch(
+      /display_name/i,
+    );
+    expect(purge.body, 'idempotency keys are user wide, not couple scoped').not.toMatch(
+      /delete\s+from\s+app\.idempotency_keys/i,
+    );
+    expect(purge.body, 'invite attempts are user wide, not couple scoped').not.toMatch(
+      /delete\s+from\s+app\.invite_attempts/i,
+    );
+    // And nothing may be keyed off the member list, which is what leaked before.
+    expect(purge.body).not.toMatch(/user_id\s*=\s*any/i);
+  });
+
+  it('scopes every delete it does perform to the job couple', () => {
+    const [purge] = functionsNamed('public.purge_couple_data');
+    const deletes = [...purge.body.matchAll(/delete\s+from\s+([a-z_.]+)([^;]*);/gi)];
+    expect(deletes.length).toBeGreaterThanOrEqual(4);
+    for (const [stmt, table] of deletes) {
+      expect(stmt, `${table} delete is not couple scoped`).toMatch(
+        /couple_id\s*=\s*v_job\.couple_id/i,
+      );
+    }
+    for (const table of [
+      'public.visits',
+      'public.wishlist_places',
+      'public.couple_invites',
+      'public.couple_members',
+    ]) {
+      expect(purge.body, `${table} not purged`).toContain(table);
+    }
+  });
+
+  it('closes a job only once the database purge and every object are recorded', () => {
+    const [complete] = functionsNamed('public.complete_purge_job');
+    expect(complete).toBeDefined();
+    expect(complete.body).toMatch(/db_purged_at\s+is\s+null/i);
+    expect(complete.body).toMatch(/deleted_at\s+is\s+null/i);
+    expect(complete.body).toMatch(/purge_incomplete/);
+    // An unfinished job goes back on the queue instead of being closed.
+    const succeeded = complete.body.search(/'succeeded'/);
+    const incomplete = complete.body.search(/purge_incomplete/);
+    expect(incomplete).toBeGreaterThan(-1);
+    expect(incomplete).toBeLessThan(succeeded);
+    expect(complete.body).toMatch(/last_error/);
+  });
+
+  it('keeps a failed job retryable and visible', () => {
+    const [complete] = functionsNamed('public.complete_purge_job');
+    expect(complete.body).toMatch(/'queued'/);
+    expect(complete.body).toMatch(/'failed'/);
+    expect(complete.body).toMatch(/purge_max_attempts/);
+  });
+});
+
+describe('photo path and ownership contract', () => {
+  it('validates the canonical path against the target visit', () => {
+    const [photo] = functionsNamed('public.register_visit_photo');
+    expect(photo).toBeDefined();
+    // Three segments: couple, visit, filename.
+    expect(photo.body).toMatch(/string_to_array|storage\.foldername/i);
+    expect(photo.body).toMatch(/array_length\s*\([\s\S]{0,40}<>\s*3|=\s*3/);
+    expect(photo.body, 'the couple segment is unchecked').toMatch(/v_couple_id/);
+    expect(photo.body, 'the visit segment is unchecked').toMatch(
+      /\[\s*2\s*\][\s\S]{0,60}p_visit_id|p_visit_id[\s\S]{0,60}\[\s*2\s*\]/,
+    );
+    expect(photo.body).toMatch(/validation_error/);
+    expect(photo.body).toMatch(/'visit-photos'/);
+  });
+
+  it('requires both the couple and a readable visit to write an object', () => {
+    const insert = policies().find(
+      (p) => p.table === 'storage.objects' && p.command === 'insert',
+    );
+    expect(insert).toBeDefined();
+    expect(insert.expression).toMatch(/app\.current_couple_id/);
+    expect(insert.expression, 'the visit path segment is unchecked').toMatch(
+      /app\.can_read_visit[\s\S]{0,80}\[\s*2\s*\]/,
+    );
+  });
+
+  it('stops a partner overwriting an object they did not upload', () => {
+    const update = policies().find(
+      (p) => p.table === 'storage.objects' && p.command === 'update',
+    );
+    expect(update).toBeDefined();
+    expect(update.expression, 'update is not gated on uploader ownership').toMatch(
+      /uploader_id\s*=\s*auth\.uid\(\)/i,
+    );
+    expect(update.expression).toMatch(/public\.visit_photos/);
+  });
+
+  it('permits a shared reorder and nothing else on the metadata row', () => {
+    const guard = functions().find((f) => /guard_visit_photo_columns/i.test(f.name));
+    expect(guard, 'no metadata update guard').toBeDefined();
+    // Allow-list rather than deny-list, so a column added later is immutable by
+    // default instead of silently writable.
+    expect(guard.body).toMatch(/'ordinal'/);
+    expect(guard.body).toMatch(/'updated_at'/);
+    expect(guard.body).toMatch(/is\s+distinct\s+from/i);
+    for (const column of ['id', 'visit_id', 'uploader_id', 'storage_path', 'checksum']) {
+      expect(guard.body, `${column} must not be named as mutable`).not.toContain(
+        `'${column}'`,
+      );
+    }
+    const trigger = statements().find(
+      (st) =>
+        /create\s+trigger/i.test(st.code) &&
+        /before\s+update\s+on\s+public\.visit_photos/i.test(st.code) &&
+        /guard_visit_photo_columns/i.test(st.code),
+    );
+    expect(trigger, 'the guard is not wired to visit_photos').toBeDefined();
+  });
+
+  it('forces the bucket private without discarding configured limits', () => {
+    const bucket = inserts().find((i) => i.table === 'storage.buckets');
+    expect(bucket).toBeDefined();
+    expect(bucket.code, 'an existing public bucket would stay public').not.toMatch(
+      /on\s+conflict[\s\S]*do\s+nothing/i,
+    );
+    expect(bucket.code).toMatch(/on\s+conflict\s*\(\s*id\s*\)\s*do\s+update/i);
+    const doUpdate = bucket.code.slice(bucket.code.search(/do\s+update/i));
+    expect(doUpdate).toMatch(/public\s*=\s*false/i);
+    // Size and MIME are set outside SQL; the conflict path must leave them alone.
+    expect(doUpdate, 'the conflict path overwrites file_size_limit').not.toMatch(
+      /file_size_limit/i,
+    );
+    expect(doUpdate, 'the conflict path overwrites allowed_mime_types').not.toMatch(
+      /allowed_mime_types/i,
+    );
   });
 });
 
@@ -787,7 +1049,7 @@ describe('operating values deferred to the external gate', () => {
 describe('database scenario tests are present as SQL', () => {
   it('ships pgTAP scripts for the required scenarios', () => {
     const files = sqlTestFiles();
-    expect(files.length).toBeGreaterThanOrEqual(6);
+    expect(files.length).toBeGreaterThanOrEqual(7);
     const joined = files.join(' ');
     for (const topic of [
       'two_user',
@@ -796,8 +1058,46 @@ describe('database scenario tests are present as SQL', () => {
       'photo',
       'invite',
       'disconnect',
+      // Regression: an old couple's purge must not touch new-couple state.
+      'purge_isolation',
     ]) {
       expect(joined, `no SQL scenario covers ${topic}`).toContain(topic);
+    }
+  });
+
+  it('contains no assertion that is predicated to never match a row', () => {
+    for (const file of sqlTestFiles()) {
+      const sql = readSqlTest(file);
+      expect(sql, `${file} has a statement that cannot affect a row`).not.toMatch(
+        /\b(and|where)\s+false\b/i,
+      );
+    }
+  });
+
+  it('asserts the partner reorder actually moved a row', () => {
+    const file = sqlTestFiles().find((f) => /photo/i.test(f));
+    expect(file).toBeDefined();
+    const sql = readSqlTest(file);
+    const reorder = sql.slice(sql.search(/reorder/i));
+    expect(reorder).toMatch(/update\s+public\.visit_photos\s+set\s+ordinal\s*=/i);
+    // A lives_ok on a no-op update proves nothing; the new value has to be read back.
+    expect(reorder).toMatch(/\bis\s*\(|\bselect\s+is\b/i);
+    expect(reorder).toMatch(/select\s+ordinal\s+from\s+public\.visit_photos/i);
+  });
+
+  it('resolves the invite lifetime in test setup rather than relying on a default', () => {
+    for (const file of sqlTestFiles()) {
+      const sql = readSqlTest(file);
+      if (!/create_couple|issue_invite/i.test(sql)) continue;
+      expect(sql, `${file} calls create_couple without resolving the ttl`).toMatch(
+        /update\s+app\.config[\s\S]{0,200}invite_ttl_seconds/i,
+      );
+    }
+  });
+
+  it('states plainly that these scripts have not been run', () => {
+    for (const file of sqlTestFiles()) {
+      expect(readSqlTest(file).slice(0, 400)).toMatch(/NOT EXECUTED/);
     }
   });
 });

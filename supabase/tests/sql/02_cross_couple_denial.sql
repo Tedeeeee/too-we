@@ -8,6 +8,11 @@ select plan(10);
 
 create extension if not exists pgtap;
 
+-- Test-only setup. The production seed leaves invite_ttl_seconds unresolved on
+-- purpose and app.issue_invite fails closed until it is set; resolving it inside
+-- this rolled-back transaction is test setup, not a default the migration invents.
+update app.config set value = to_jsonb(3600), resolved = true where key = 'invite_ttl_seconds';
+
 insert into auth.users (id, instance_id, aud, role, is_anonymous)
 values
   ('aaaaaaaa-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', true),
@@ -82,7 +87,9 @@ select is(
   'registering a photo on a foreign visit is reported as not_found'
 );
 
--- A direct insert cannot borrow the other couple's identifier either.
+-- A direct insert cannot borrow the other couple's identifier either. There is no
+-- insert policy on visits at all, so this is refused for any couple id: create_visit
+-- is the only way in.
 select throws_ok(
   format(
     $$insert into public.visits (couple_id, visited_at, place_name, created_by)
@@ -91,7 +98,7 @@ select throws_ok(
   ),
   '42501',
   null,
-  'inserting a visit into a foreign couple violates the insert policy'
+  'a direct visit insert is refused, foreign couple id or not'
 );
 
 select is(

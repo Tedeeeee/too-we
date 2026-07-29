@@ -266,6 +266,11 @@ export function sqlTestFiles() {
     .sort();
 }
 
+/** Raw text of a pgTAP scenario file. */
+export function readSqlTest(file) {
+  return readFileSync(join(SQL_TESTS_DIR, file), 'utf8');
+}
+
 let cache = null;
 
 function load() {

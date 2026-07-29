@@ -109,19 +109,25 @@ create table public.couple_invites (
   id uuid primary key default gen_random_uuid(),
   couple_id uuid not null references public.couples (id) on delete cascade,
   code text not null check (code ~ '^[0-9]{6}$'),
-  status text not null default 'active' check (status in ('active', 'consumed', 'revoked')),
-  expires_at timestamptz,
+  status text not null default 'active'
+    check (status in ('active', 'consumed', 'revoked', 'expired')),
+  expires_at timestamptz not null,
   created_by uuid references public.profiles (id) on delete set null,
   created_at timestamptz not null default now(),
   consumed_at timestamptz,
   consumed_by uuid references public.profiles (id) on delete set null,
   revoked_at timestamptz,
+  expired_at timestamptz,
   constraint couple_invites_consumed_stamp check (status <> 'consumed' or consumed_at is not null),
-  constraint couple_invites_revoked_stamp check (status <> 'revoked' or revoked_at is not null)
+  constraint couple_invites_revoked_stamp check (status <> 'revoked' or revoked_at is not null),
+  constraint couple_invites_expired_stamp check (status <> 'expired' or expired_at is not null)
 );
 
 comment on column public.couple_invites.expires_at is
-  'Null means no expiry, which is the state until invite_ttl_seconds is resolved at the external gate.';
+  'Never null. A code with no lifetime is not issuable: app.issue_invite fails closed when invite_ttl_seconds is unresolved.';
+
+comment on column public.couple_invites.expired_at is
+  'Expiry is its own terminal status, not a flavour of revoked, so a repeated attempt on the same code still answers invite_expired.';
 
 /* ------------------------------------------------------------------ */
 /* 3. flower bookmarks — the seven keys the app already ships           */
@@ -435,6 +441,8 @@ as $fn$
     when 'active_membership_conflict' then 'TW011'
     when 'photo_limit_reached' then 'TW012'
     when 'conflict' then 'TW013'
+    when 'config_unresolved' then 'TW014'
+    when 'purge_incomplete' then 'TW015'
     else 'TW099'
   end
 $fn$;
@@ -529,6 +537,55 @@ as $fn$
    where c.key = p_key
      and c.value is not null
      and jsonb_typeof(c.value) = 'number'
+$fn$;
+
+-- Fails closed. An operating value that was never agreed at the external gate
+-- stops the flow with a named error instead of turning into an invented default,
+-- which is how a "no expiry" invite code could otherwise be issued.
+create or replace function app.require_config_seconds(p_key text)
+returns integer
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $fn$
+declare
+  v_row app.config;
+  v_seconds numeric;
+begin
+  select * into v_row from app.config c where c.key = p_key;
+
+  if not found then
+    perform app.raise_error(
+      'config_unresolved', jsonb_build_object('key', p_key, 'reason', 'missing')
+    );
+  end if;
+
+  if not v_row.resolved or v_row.value is null then
+    perform app.raise_error(
+      'config_unresolved', jsonb_build_object('key', p_key, 'reason', 'unresolved')
+    );
+  end if;
+
+  if jsonb_typeof(v_row.value) <> 'number' then
+    perform app.raise_error(
+      'config_unresolved', jsonb_build_object('key', p_key, 'reason', 'not_a_number')
+    );
+  end if;
+
+  v_seconds := (v_row.value #>> '{}')::numeric;
+
+  -- Zero and negative are rejected, and the upper bound is the integer limit
+  -- rather than an invented maximum lifetime.
+  if v_seconds < 1 or v_seconds > 2147483647 then
+    perform app.raise_error(
+      'config_unresolved',
+      jsonb_build_object('key', p_key, 'reason', 'not_positive', 'value', v_row.value)
+    );
+  end if;
+
+  return floor(v_seconds)::integer;
+end
 $fn$;
 
 create or replace function app.try_uuid(p_value text)
@@ -690,8 +747,29 @@ begin
 end
 $fn$;
 
--- Identity columns of an uploaded object stay fixed after insert, so the other
--- member can reorder a photo without being able to repoint it.
+-- The shared reorder is the only thing a member may change on a photo metadata
+-- row. Everything else — id, visit_id, uploader_id, bucket, path, content
+-- metadata, checksum, created_at, and any column added later — is immutable once
+-- the object is registered. An allow-list rather than a deny-list, so a new
+-- column is immutable by default instead of silently writable.
+create or replace function app.guard_visit_photo_columns()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $fn$
+begin
+  if (to_jsonb(old) - 'ordinal' - 'updated_at')
+     is distinct from (to_jsonb(new) - 'ordinal' - 'updated_at') then
+    perform app.raise_error(
+      'forbidden', jsonb_build_object('reason', 'only_ordinal_is_mutable')
+    );
+  end if;
+  return new;
+end
+$fn$;
+
+-- Identity columns of the other shared tables stay fixed after insert.
 --
 -- Definer because it calls app.raise_error, and a nested call from an invoker
 -- function would be privilege checked against the client role.
@@ -742,11 +820,9 @@ create trigger visit_photos_set_updated_at
   before update on public.visit_photos
   for each row execute function app.set_updated_at();
 
-create trigger visit_photos_guard_immutable
+create trigger visit_photos_guard_columns
   before update on public.visit_photos
-  for each row execute function app.guard_immutable_columns(
-    'visit_id', 'uploader_id', 'storage_bucket', 'storage_path'
-  );
+  for each row execute function app.guard_visit_photo_columns();
 
 create trigger visit_entries_guard_immutable
   before update on public.visit_entries
@@ -794,8 +870,7 @@ as $fn$
   select jsonb_build_object(
     'code', p_invite.code,
     'status', p_invite.status,
-    'expires_at', p_invite.expires_at,
-    'ttl_unresolved', p_invite.expires_at is null
+    'expires_at', p_invite.expires_at
   )
 $fn$;
 
@@ -808,14 +883,16 @@ security definer
 set search_path = ''
 as $fn$
 declare
-  v_ttl integer := app.config_int('invite_ttl_seconds');
+  v_ttl integer;
   v_expires timestamptz;
   v_invite public.couple_invites;
   v_attempt integer := 0;
 begin
-  if v_ttl is not null then
-    v_expires := now() + make_interval(secs => v_ttl);
-  end if;
+  -- First, and before any write: an unconfigured lifetime must not silently
+  -- become a code that never expires, and a rejected configuration must not have
+  -- already revoked the couple's working code.
+  v_ttl := app.require_config_seconds('invite_ttl_seconds');
+  v_expires := now() + make_interval(secs => v_ttl);
 
   update public.couple_invites
      set status = 'revoked',
@@ -1003,6 +1080,10 @@ create policy flowers_select_all
 -- visits: shared data. Place, date and time, tags and flower are editable by
 -- both active members. Deleting a visit is not an MVP behaviour and has no
 -- client policy.
+--
+-- There is deliberately no insert policy. public.create_visit is the only way in,
+-- so the empty-visit invariant and the idempotency boundary cannot be bypassed by
+-- a direct insert from the client.
 drop policy if exists visits_select_member on public.visits;
 create policy visits_select_member
   on public.visits
@@ -1011,11 +1092,6 @@ create policy visits_select_member
   using (app.is_active_member(couple_id));
 
 drop policy if exists visits_insert_member on public.visits;
-create policy visits_insert_member
-  on public.visits
-  for insert
-  to authenticated
-  with check (app.is_active_member(couple_id) and created_by = auth.uid());
 
 drop policy if exists visits_update_member on public.visits;
 create policy visits_update_member
@@ -1166,7 +1242,8 @@ revoke all on table public.flowers from anon, authenticated;
 grant select on table public.flowers to authenticated;
 
 revoke all on table public.visits from anon, authenticated;
-grant select, insert, update on table public.visits to authenticated;
+-- No insert: public.create_visit is the only entry point.
+grant select, update on table public.visits to authenticated;
 
 revoke all on table public.visit_entries from anon, authenticated;
 grant select, insert, update, delete on table public.visit_entries to authenticated;
@@ -1441,6 +1518,8 @@ begin
       );
     end if;
 
+    -- Three distinct terminal states, so a repeated attempt on the same code
+    -- keeps answering the same thing it answered the first time.
     if v_invite.status = 'consumed' then
       perform app.log_invite_attempt(v_uid, v_code, 'consumed');
       return app.error_result(
@@ -1450,14 +1529,25 @@ begin
       );
     end if;
 
+    if v_invite.status = 'expired' then
+      perform app.log_invite_attempt(v_uid, v_code, 'expired');
+      return app.error_result(
+        'invite_expired',
+        jsonb_build_object('expired_at', v_invite.expires_at),
+        v_uid, 'join_couple', p_request_key
+      );
+    end if;
+
     perform app.log_invite_attempt(v_uid, v_code, 'revoked');
     return app.error_result('invite_revoked', '{}'::jsonb, v_uid, 'join_couple', p_request_key);
   end if;
 
-  if v_invite.expires_at is not null and v_invite.expires_at <= now() then
+  if v_invite.expires_at <= now() then
+    -- Expiry gets its own terminal status. Folding it into revoked would make the
+    -- second attempt on the same code report invite_revoked instead.
     update public.couple_invites
-       set status = 'revoked',
-           revoked_at = now()
+       set status = 'expired',
+           expired_at = now()
      where id = v_invite.id;
 
     perform app.log_invite_attempt(v_uid, v_code, 'expired');
@@ -1560,14 +1650,13 @@ begin
 end
 $fn$;
 
--- Empty visit creation. Place, date and time are required; everything else is
--- optional, and the request key makes a double submit return the first visit.
+-- Empty visit creation, and only that. A new record starts with no flower, no
+-- tag, no entry and no photo; those arrive later through their own RPCs. The
+-- request key is mandatory so a double submit returns the first visit.
 create or replace function public.create_visit(
   p_place jsonb,
   p_visited_at timestamptz,
-  p_request_key text,
-  p_flower_key text default null,
-  p_tags text[] default null
+  p_request_key text
 )
 returns jsonb
 language plpgsql
@@ -1583,8 +1672,6 @@ declare
   v_provider text;
   v_lat double precision;
   v_lng double precision;
-  v_label text;
-  v_ordinal smallint := 0;
   v_result jsonb;
 begin
   if v_uid is null then
@@ -1613,14 +1700,6 @@ begin
     );
   end if;
 
-  if p_flower_key is not null
-     and not exists (select 1 from public.flowers f where f.key = p_flower_key) then
-    return app.error_result(
-      'validation_error', jsonb_build_object('field', 'p_flower_key'),
-      v_uid, 'create_visit', p_request_key
-    );
-  end if;
-
   -- Validate the payload here so a malformed place snapshot is a named outcome
   -- rather than a check constraint violation surfacing as an unhandled failure.
   v_provider := coalesce(nullif(btrim(coalesce(p_place ->> 'provider', '')), ''), 'kakao');
@@ -1642,10 +1721,11 @@ begin
     );
   end if;
 
+  -- flower_key is deliberately absent from this list: a new visit is empty.
   insert into public.visits (
     couple_id, visited_at, place_provider, place_provider_id, place_name,
     place_category, place_address, place_road_address, place_phone, place_url,
-    place_lat, place_lng, place_snapshot, place_snapshot_at, flower_key, created_by
+    place_lat, place_lng, place_snapshot, place_snapshot_at, created_by
   )
   values (
     v_couple_id,
@@ -1662,21 +1742,9 @@ begin
     v_lng,
     coalesce(p_place, '{}'::jsonb),
     now(),
-    p_flower_key,
     v_uid
   )
   returning * into v_visit;
-
-  if p_tags is not null then
-    foreach v_label in array p_tags loop
-      v_label := nullif(btrim(coalesce(v_label, '')), '');
-      continue when v_label is null;
-      v_ordinal := v_ordinal + 1;
-      exit when v_ordinal > 20;
-      insert into public.visit_tags (visit_id, ordinal, label, created_by)
-      values (v_visit.id, v_ordinal, v_label, v_uid);
-    end loop;
-  end if;
 
   v_result := app.ok_result(
     jsonb_build_object('visit_id', v_visit.id, 'couple_id', v_couple_id)
@@ -1793,6 +1861,8 @@ declare
   v_uid uuid := auth.uid();
   v_bucket text := 'visit-photos';
   v_path text;
+  v_segments text[];
+  v_couple_id uuid;
   v_replay jsonb;
   v_photo public.visit_photos;
   v_count integer;
@@ -1813,6 +1883,26 @@ begin
   v_path := nullif(btrim(coalesce(p_storage_path, '')), '');
   if v_path is null then
     return app.error_result('validation_error', jsonb_build_object('field', 'p_storage_path'));
+  end if;
+
+  -- The object path is the only thing the storage policies can key off, so the
+  -- metadata row is not allowed to describe a path outside this visit's folder.
+  -- Canonical form: <couple_id>/<visit_id>/<filename> in the visit-photos bucket.
+  select v.couple_id into v_couple_id from public.visits v where v.id = p_visit_id;
+
+  v_segments := string_to_array(v_path, '/');
+  if array_length(v_segments, 1) <> 3
+     or app.try_uuid(v_segments[1]) is distinct from v_couple_id
+     or app.try_uuid(v_segments[2]) is distinct from p_visit_id
+     or nullif(btrim(coalesce(v_segments[3], '')), '') is null then
+    return app.error_result(
+      'validation_error',
+      jsonb_build_object(
+        'field', 'p_storage_path',
+        'bucket', v_bucket,
+        'expected', 'couple_id/visit_id/filename'
+      )
+    );
   end if;
 
   v_replay := app.begin_idempotent(v_uid, 'register_visit_photo', p_request_key);
@@ -2081,29 +2171,25 @@ set search_path = ''
 as $fn$
 declare
   v_job app.purge_jobs;
-  v_members uuid[];
+  v_visits integer;
 begin
   select * into v_job from app.purge_jobs where id = p_job_id for update;
   if not found then
     perform app.raise_error('not_found', jsonb_build_object('resource', 'purge_job'));
   end if;
 
-  select coalesce(array_agg(m.user_id), '{}'::uuid[]) into v_members
-    from public.couple_members m
-   where m.couple_id = v_job.couple_id;
-
+  -- Strictly couple scoped. The job can run up to 24 hours after the disconnect,
+  -- and by then either user may already have created a new couple, a new profile
+  -- name and new idempotency keys. Nothing keyed by user_id may be touched here:
+  --   * profiles.display_name belongs to the person, not to the couple
+  --   * app.idempotency_keys and app.invite_attempts are user wide, and deleting
+  --     them would replay-unprotect and un-rate-limit the user's new couple
   -- visits cascade to entries, tags and photo metadata.
   delete from public.visits where couple_id = v_job.couple_id;
+  get diagnostics v_visits = row_count;
+
   delete from public.wishlist_places where couple_id = v_job.couple_id;
   delete from public.couple_invites where couple_id = v_job.couple_id;
-  delete from app.idempotency_keys where user_id = any (v_members);
-  delete from app.invite_attempts where user_id = any (v_members);
-
-  -- The name was shared into the couple and onboarding collects it again.
-  update public.profiles
-     set display_name = null
-   where id = any (v_members);
-
   delete from public.couple_members where couple_id = v_job.couple_id;
 
   update public.couples
@@ -2121,7 +2207,7 @@ begin
     jsonb_build_object(
       'job_id', p_job_id,
       'couple_id', v_job.couple_id,
-      'members_cleared', coalesce(array_length(v_members, 1), 0)
+      'visits_deleted', v_visits
     )
   );
 end
@@ -2172,6 +2258,7 @@ as $fn$
 declare
   v_job app.purge_jobs;
   v_max integer := app.config_int('purge_max_attempts');
+  v_pending integer;
   v_status text;
 begin
   select * into v_job from app.purge_jobs where id = p_job_id for update;
@@ -2180,6 +2267,32 @@ begin
   end if;
 
   if p_succeeded then
+    -- A job may only be closed once the database purge and every queued object
+    -- deletion are recorded. Otherwise it goes back on the queue with the reason
+    -- attached, so nothing is silently reported as deleted.
+    select count(*) into v_pending
+      from app.purge_job_objects o
+     where o.job_id = p_job_id
+       and o.deleted_at is null;
+
+    if v_job.db_purged_at is null or v_pending > 0 then
+      update app.purge_jobs
+         set status = 'queued',
+             last_error = 'purge_incomplete: db_purged='
+                          || (v_job.db_purged_at is not null)::text
+                          || ' pending_objects=' || v_pending::text
+       where id = p_job_id;
+
+      return app.error_result(
+        'purge_incomplete',
+        jsonb_build_object(
+          'job_id', p_job_id,
+          'db_purged', v_job.db_purged_at is not null,
+          'pending_objects', v_pending
+        )
+      );
+    end if;
+
     v_status := 'succeeded';
   elsif v_max is not null and v_job.attempts >= v_max then
     v_status := 'failed';
@@ -2209,6 +2322,7 @@ revoke all on function app.ok_result(jsonb, boolean) from public, anon, authenti
 revoke all on function app.error_result(text, jsonb, uuid, text, text) from public, anon, authenticated;
 revoke all on function app.config_value(text) from public, anon, authenticated;
 revoke all on function app.config_int(text) from public, anon, authenticated;
+revoke all on function app.require_config_seconds(text) from public, anon, authenticated;
 revoke all on function app.try_uuid(text) from public, anon, authenticated;
 revoke all on function app.try_double(text) from public, anon, authenticated;
 revoke all on function app.try_bigint(text) from public, anon, authenticated;
@@ -2220,6 +2334,7 @@ revoke all on function app.can_read_visit(uuid) from public, anon, authenticated
 revoke all on function app.set_updated_at() from public, anon, authenticated;
 revoke all on function app.normalize_visit_entry() from public, anon, authenticated;
 revoke all on function app.guard_immutable_columns() from public, anon, authenticated;
+revoke all on function app.guard_visit_photo_columns() from public, anon, authenticated;
 revoke all on function app.new_invite_code() from public, anon, authenticated;
 revoke all on function app.invite_public_json(public.couple_invites) from public, anon, authenticated;
 revoke all on function app.issue_invite(uuid, uuid) from public, anon, authenticated;
@@ -2231,7 +2346,7 @@ revoke all on function public.upsert_my_profile(text) from public, anon, authent
 revoke all on function public.create_couple(text, date, text) from public, anon, authenticated;
 revoke all on function public.reissue_couple_invite(text) from public, anon, authenticated;
 revoke all on function public.join_couple_with_code(text, text, text) from public, anon, authenticated;
-revoke all on function public.create_visit(jsonb, timestamptz, text, text, text[]) from public, anon, authenticated;
+revoke all on function public.create_visit(jsonb, timestamptz, text) from public, anon, authenticated;
 revoke all on function public.upsert_my_visit_entry(uuid, text, smallint) from public, anon, authenticated;
 revoke all on function public.set_visit_tags(uuid, text[]) from public, anon, authenticated;
 revoke all on function public.register_visit_photo(uuid, text, jsonb, text) from public, anon, authenticated;
@@ -2253,7 +2368,7 @@ grant execute on function public.upsert_my_profile(text) to authenticated;
 grant execute on function public.create_couple(text, date, text) to authenticated;
 grant execute on function public.reissue_couple_invite(text) to authenticated;
 grant execute on function public.join_couple_with_code(text, text, text) to authenticated;
-grant execute on function public.create_visit(jsonb, timestamptz, text, text, text[]) to authenticated;
+grant execute on function public.create_visit(jsonb, timestamptz, text) to authenticated;
 grant execute on function public.upsert_my_visit_entry(uuid, text, smallint) to authenticated;
 grant execute on function public.set_visit_tags(uuid, text[]) to authenticated;
 grant execute on function public.register_visit_photo(uuid, text, jsonb, text) to authenticated;

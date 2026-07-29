@@ -9,6 +9,11 @@ select plan(9);
 
 create extension if not exists pgtap;
 
+-- Test-only setup. The production seed leaves invite_ttl_seconds unresolved on
+-- purpose and app.issue_invite fails closed until it is set; resolving it inside
+-- this rolled-back transaction is test setup, not a default the migration invents.
+update app.config set value = to_jsonb(3600), resolved = true where key = 'invite_ttl_seconds';
+
 insert into auth.users (id, instance_id, aud, role, is_anonymous)
 values
   ('cccccccc-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', true),
