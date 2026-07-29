@@ -70,11 +70,19 @@ function assertPublishableKey(key) {
 /**
  * 환경변수에서 브라우저용 설정을 읽는다.
  *
- * @param {Record<string, string>} [env] 기본값은 `import.meta.env`
+ * 인수를 **생략**하면 `import.meta.env`를 읽고, **명시적으로** `undefined`나 `{}`를
+ * 넘기면 ambient 환경을 읽지 않는다. 기본 인수 문법(`env = defaultEnv()`)은 이 둘을
+ * 구분하지 못해서 — 명시적 undefined에도 기본값이 적용된다 — rest 인수로 호출 여부를
+ * 직접 본다. 그러지 않으면 `.env.local`이 있는 워크스페이스에서 테스트가 실제 설정을
+ * 읽어 버려 결과가 워크스페이스마다 달라진다.
+ *
+ * @param {Record<string, string>} [env] 생략 시 `import.meta.env`
  * @returns {{ url: string, publishableKey: string }}
  * @throws {AppError} code `configuration` (재시도 불가)
  */
-export function readSupabaseConfig(env = defaultEnv()) {
+export function readSupabaseConfig(...args) {
+  const env = args.length === 0 ? defaultEnv() : (args[0] ?? {});
+
   const url = readEnv(env, SUPABASE_URL_ENV);
   const publishableKey = readEnv(env, PUBLISHABLE_KEY_ENV);
 
@@ -94,6 +102,9 @@ export function readSupabaseConfig(env = defaultEnv()) {
  * `signInAnonymously()` 세션이 새로고침 뒤에도 살아 있어야 하므로 세션 저장과
  * 토큰 자동 갱신을 켠다. MVP에는 OAuth 리다이렉트가 없어 URL 파싱은 끈다.
  *
+ * `env`도 `readSupabaseConfig`와 같은 규칙을 따른다 — 키를 아예 주지 않으면
+ * `import.meta.env`를 읽고, `env: undefined`처럼 키를 명시하면 ambient를 읽지 않는다.
+ *
  * @param {{
  *   url?: string,
  *   publishableKey?: string,
@@ -102,16 +113,13 @@ export function readSupabaseConfig(env = defaultEnv()) {
  *   options?: object,
  * }} [deps]
  */
-export function createSupabaseClient({
-  url,
-  publishableKey,
-  env,
-  createClient = createSupabaseJsClient,
-  options = {},
-} = {}) {
+export function createSupabaseClient(deps = {}) {
+  const { url, publishableKey, createClient = createSupabaseJsClient, options = {} } = deps;
+  const base = Object.hasOwn(deps, 'env') ? (deps.env ?? {}) : defaultEnv();
+
   // 직접 넘긴 값이 환경변수를 덮되, 검증 경로는 readSupabaseConfig 하나로 유지한다.
   const config = readSupabaseConfig({
-    ...(env ?? defaultEnv()),
+    ...base,
     ...(url === undefined ? {} : { [SUPABASE_URL_ENV]: url }),
     ...(publishableKey === undefined ? {} : { [PUBLISHABLE_KEY_ENV]: publishableKey }),
   });
