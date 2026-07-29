@@ -271,6 +271,108 @@ export function readSqlTest(file) {
   return readFileSync(join(SQL_TESTS_DIR, file), 'utf8');
 }
 
+/**
+ * pgTAP calls that consume one slot of the declared plan. Only the ones this
+ * project actually uses plus close neighbours; the counter reports anything it
+ * does not recognise rather than quietly leaving it out of the total.
+ */
+export const PGTAP_ASSERTIONS = new Set([
+  'ok',
+  'is',
+  'isnt',
+  'matches',
+  'imatches',
+  'doesnt_match',
+  'cmp_ok',
+  'isa_ok',
+  'pass',
+  'fail',
+  'throws_ok',
+  'throws_like',
+  'lives_ok',
+  'performs_ok',
+  'results_eq',
+  'results_ne',
+  'set_eq',
+  'set_ne',
+  'set_has',
+  'bag_eq',
+  'is_empty',
+  'isnt_empty',
+  'has_table',
+  'hasnt_table',
+  'has_column',
+  'hasnt_column',
+  'col_is_pk',
+  'col_not_null',
+  'col_type_is',
+  'has_index',
+  'has_function',
+  'has_role',
+  'policies_are',
+  'table_privs_are',
+  'function_privs_are',
+]);
+
+/** Top-level calls that do not consume a plan slot. */
+export const PGTAP_NON_ASSERTIONS = new Set([
+  'plan',
+  'no_plan',
+  'finish',
+  'diag',
+  'note',
+  'todo',
+  'skip',
+  // Not pgTAP at all, but a legitimate bare top-level call in these scripts.
+  'set_config',
+]);
+
+/**
+ * Compare a pgTAP script's declared plan with the number of top-level assertion
+ * calls it makes.
+ *
+ * Statements come from the same tokeniser the migrations use, so an assertion
+ * name appearing inside a string or a dollar-quoted block cannot inflate the
+ * count, and indentation cannot hide a call from it.
+ *
+ * `unrecognised` lists bare top-level function calls that are in neither set. A
+ * non-empty list means the counter is out of date and its total cannot be
+ * trusted — treat it as a failure, not as a zero.
+ */
+export function countPgTapPlan(text) {
+  let declared = null;
+  let counted = 0;
+  const unrecognised = [];
+
+  for (const st of parseSql(text)) {
+    const code = st.code.replace(/\s+/g, ' ').trim();
+    // A schema-qualified call (public.foo(...)) never matches: the identifier is
+    // followed by a dot rather than an opening paren.
+    const call = /^select\s+(?:distinct\s+)?([a-z_][a-z0-9_]*)\s*\(/i.exec(code);
+    if (!call) continue;
+    const fn = call[1].toLowerCase();
+
+    if (fn === 'plan') {
+      const n = /^select\s+plan\s*\(\s*(\d+)\s*\)/i.exec(code);
+      if (n) declared = Number(n[1]);
+      continue;
+    }
+    if (PGTAP_ASSERTIONS.has(fn)) {
+      counted += 1;
+      continue;
+    }
+    if (PGTAP_NON_ASSERTIONS.has(fn)) continue;
+    unrecognised.push(fn);
+  }
+
+  return { declared, counted, unrecognised };
+}
+
+/** countPgTapPlan for one of the scenario files. */
+export function sqlTestPlan(file) {
+  return { file, ...countPgTapPlan(readSqlTest(file)) };
+}
+
 let cache = null;
 
 function load() {

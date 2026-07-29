@@ -278,7 +278,7 @@ create table app.config (
 -- ones carrying a number are provisional and tunable without a migration.
 insert into app.config (key, value, resolved, description) values
   ('invite_ttl_seconds', null, false,
-   'EXTERNAL GATE: invite code lifetime in seconds. While unset, issued invites carry no expiry.'),
+   'EXTERNAL GATE: invite code lifetime in seconds. While unresolved, app.issue_invite refuses to issue and couple creation fails closed; there is no fallback lifetime.'),
   ('invite_attempt_max', '10'::jsonb, false,
    'EXTERNAL GATE (provisional): failed invite attempts allowed per user per window.'),
   ('invite_attempt_window_seconds', '600'::jsonb, false,
@@ -2276,8 +2276,12 @@ begin
        and o.deleted_at is null;
 
     if v_job.db_purged_at is null or v_pending > 0 then
+      -- completed_at is cleared with the requeue: a queued job carrying a
+      -- completion timestamp would read as finished to anything inspecting the
+      -- table directly.
       update app.purge_jobs
          set status = 'queued',
+             completed_at = null,
              last_error = 'purge_incomplete: db_purged='
                           || (v_job.db_purged_at is not null)::text
                           || ' pending_objects=' || v_pending::text

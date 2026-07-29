@@ -13,10 +13,15 @@
  *
  * Spec: docs/specs/2026-07-29-mvp-functional-spec.md
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import { FLOWERS } from '../../src/data/fixtures.js';
 import {
+  SUPABASE_DIR,
+  countPgTapPlan,
   createTables,
   createdTableNames,
   functions,
@@ -33,6 +38,7 @@ import {
   rlsEnabledTables,
   splitTopLevel,
   sqlTestFiles,
+  sqlTestPlan,
   statements,
   tableColumns,
   tableSql,
@@ -298,6 +304,20 @@ describe('invite codes', () => {
   it('never invents a lifetime in the production seed', () => {
     const seed = inserts().find((i) => i.table === 'app.config');
     expect(seed.code).toMatch(/'invite_ttl_seconds'\s*,\s*null\s*,\s*false/i);
+  });
+
+  it('describes the unset lifetime as fail closed, not as a code without expiry', () => {
+    const seed = inserts().find((i) => i.table === 'app.config');
+    const row = seed.code.slice(seed.code.indexOf("'invite_ttl_seconds'"));
+    const description = row.slice(0, row.indexOf('),'));
+    // The description is what an operator reads before setting the value; it must
+    // not still promise the behaviour that was removed.
+    expect(description, 'the seed still advertises non-expiring invites').not.toMatch(
+      /no expiry|never expires?|non.?expiring/i,
+    );
+    expect(description).toMatch(/refuse|reject|fail|blocked?/i);
+    // And it must not smuggle in a suggested lifetime.
+    expect(description).not.toMatch(/\b\d{2,}\b/);
   });
 
   it('stops advertising an unresolved ttl that can no longer happen', () => {
@@ -669,6 +689,42 @@ describe('disconnect and purge', () => {
     expect(complete.body).toMatch(/'queued'/);
     expect(complete.body).toMatch(/'failed'/);
     expect(complete.body).toMatch(/purge_max_attempts/);
+  });
+
+  it('clears completed_at when it requeues an incomplete job', () => {
+    const [complete] = functionsNamed('public.complete_purge_job');
+    // The requeue branch: p_succeeded was true but the work is not all recorded.
+    const start = complete.body.search(/db_purged_at\s+is\s+null\s+or\s+v_pending\s*>\s*0/i);
+    expect(start, 'requeue branch not found').toBeGreaterThan(-1);
+    const branch = complete.body.slice(start, complete.body.indexOf('purge_incomplete', start));
+    expect(branch).toMatch(/status\s*=\s*'queued'/i);
+    // A queued job carrying a completion timestamp is internally inconsistent.
+    expect(branch, 'requeue leaves a stale completed_at behind').toMatch(
+      /completed_at\s*=\s*null/i,
+    );
+    expect(branch).toMatch(/last_error/);
+  });
+});
+
+describe('README states ownership and blast radius accurately', () => {
+  const readme = () => readFileSync(join(SUPABASE_DIR, 'README.md'), 'utf8');
+
+  it('attributes the repository mapping to the wave that owns it', () => {
+    const text = readme();
+    expect(text, 'the mapping owner is W1-C, not W1-B').not.toMatch(/\bW1-B\b/);
+    expect(text).toMatch(/\bW1-C\b/);
+  });
+
+  it('scopes the unresolved TTL to couple creation and invite issuance', () => {
+    const text = readme();
+    // The failure is confined to the onboarding calls that issue a code. Saying
+    // the app or the session does not start overstates it: every other screen,
+    // read and RPC is unaffected.
+    expect(text, 'overstates the blast radius as app or session startup').not.toMatch(
+      /앱이\s*시작되지\s*않는다|세션.{0,6}시작되지\s*않는다|app (does not|cannot) start/i,
+    );
+    expect(text).toMatch(/커플 생성/);
+    expect(text).toMatch(/초대 코드 발급|초대코드 발급/);
   });
 });
 
@@ -1099,5 +1155,64 @@ describe('database scenario tests are present as SQL', () => {
     for (const file of sqlTestFiles()) {
       expect(readSqlTest(file).slice(0, 400)).toMatch(/NOT EXECUTED/);
     }
+  });
+
+  /* -- the declared plan has to match what the file actually asserts -------- */
+
+  it('declares a plan count equal to its top-level assertions', () => {
+    // A wrong plan makes pgTAP report a bad run as good, or a good run as bad,
+    // and nothing else in this suite would notice. These scripts cannot be
+    // executed here, so this arithmetic is the only check they get.
+    const mismatched = [];
+    for (const file of sqlTestFiles()) {
+      const plan = sqlTestPlan(file);
+      if (plan.declared !== plan.counted) mismatched.push(plan);
+    }
+    expect(
+      mismatched.map((p) => `${p.file}: plan(${p.declared}) but ${p.counted} assertions`),
+    ).toEqual([]);
+  });
+
+  it('declares a plan at all', () => {
+    for (const file of sqlTestFiles()) {
+      expect(sqlTestPlan(file).declared, `${file} has no select plan(n)`).toBeTypeOf('number');
+    }
+  });
+
+  it('recognises every top-level call, so the count cannot silently undershoot', () => {
+    // If a script starts using a pgTAP assertion the counter does not know, the
+    // total would be too low and the plan check would pass for the wrong reason.
+    const unknown = [];
+    for (const file of sqlTestFiles()) {
+      const plan = sqlTestPlan(file);
+      for (const fn of plan.unrecognised) unknown.push(`${file}: ${fn}()`);
+    }
+    expect(unknown, 'extend PGTAP_ASSERTIONS or PGTAP_NON_ASSERTIONS').toEqual([]);
+  });
+
+  it('counts what pgTAP would count, not raw text matches', () => {
+    // A unit test on the counter itself, so the plan check above cannot pass
+    // because the counter is broken in the same direction as the files.
+    const sample = [
+      'select plan(3);',
+      "select ok(true, 'counted');",
+      "  select is(1, 1, 'counted even when indented');",
+      "select diag('is(1, 1, ''not an assertion'') inside a string');",
+      "select throws_ok($$update t set c = 1 where ok(false)$$, 'TW003', null, 'counted once');",
+      'select public.some_rpc(1);',
+      "select set_config('x', 'y', true);",
+      'select * from finish();',
+    ].join('\n');
+
+    const plan = countPgTapPlan(sample);
+    expect(plan.declared).toBe(3);
+    expect(plan.counted).toBe(3);
+    expect(plan.unrecognised).toEqual([]);
+  });
+
+  it('reports a top-level call it does not know rather than skipping it', () => {
+    const plan = countPgTapPlan("select plan(1);\nselect col_is_unique('t', 'c', 'x');");
+    expect(plan.unrecognised).toEqual(['col_is_unique']);
+    expect(plan.counted).toBe(0);
   });
 });

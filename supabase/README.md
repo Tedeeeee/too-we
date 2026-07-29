@@ -25,7 +25,7 @@ supabase/
 
 | 대상 | 상태 |
 | --- | --- |
-| `npm test -- supabase/tests/schema-contract.test.js` | **실행됨.** 89개 통과 |
+| `npm test -- supabase/tests/schema-contract.test.js` | **실행됨.** 98개 통과 |
 | `npm test` | **실행됨.** 전체 통과 |
 | `npm run build` | **실행됨.** 통과 |
 | `git diff --check` | **실행됨.** 통과 |
@@ -53,6 +53,14 @@ supabase test db
 
 pgTAP 스크립트가 `insert into auth.users (...)`로 익명 사용자를 만드는데, 필요한 컬럼이
 Supabase auth 스키마 버전에 따라 다르다. 처음 돌릴 때 컬럼 목록을 맞춰야 할 수 있다.
+
+**`plan(n)`은 계약 테스트가 검산한다.** pgTAP 스크립트를 실행할 수 없으니 잘못된 plan
+숫자를 잡아 줄 것이 없다 — plan이 실제 단정 수보다 작으면 실패한 실행이 통과로 보이고,
+크면 정상 실행이 실패로 보인다. 그래서 `countPgTapPlan()`이 각 파일을 토큰 단위로 읽어
+최상위 단정 호출 수를 세고 선언된 plan과 일치하는지 확인한다(문자열·달러 인용 안의
+`ok(` 같은 텍스트는 세지 않고, 들여쓴 호출은 놓치지 않는다). 카운터가 모르는 pgTAP 함수를
+쓰면 조용히 적게 세지 않고 그 자리에서 실패한다 — 새 단정 함수를 쓰면
+`PGTAP_ASSERTIONS`에 추가할 것.
 
 **pgTAP 테스트는 시작할 때 `invite_ttl_seconds`를 직접 resolve한다.** 프로덕션 시드는
 이 값을 미해결로 두고 `app.issue_invite`가 fail closed하기 때문에, 테스트 트랜잭션 안에서
@@ -99,6 +107,13 @@ Docker가 없으니 **실행되는** 가드는 마이그레이션 SQL에 대한 
 | purge job 완료 시 잔여 객체 검사 제거 | `closes a job only once ... every object are recorded` |
 | 버킷 충돌을 `do nothing`으로 되돌림 | `forces the bucket private without discarding configured limits` |
 | storage insert에서 visit 세그먼트 검사 제거 | `requires both the couple and a readable visit to write an object` |
+| pgTAP `plan(n)`을 실제 단정 수와 다르게 선언 | `declares a plan count equal to its top-level assertions` |
+| 카운터가 모르는 pgTAP 단정 추가 | `recognises every top-level call ...` |
+| requeue에서 `completed_at = null` 제거 | `clears completed_at when it requeues an incomplete job` |
+| 설정 설명에 "만료 없음" 문구 복원 | `describes the unset lifetime as fail closed ...` |
+| 설정 설명에 TTL 값 예시 삽입 | `describes the unset lifetime as fail closed ...` |
+| 저장소 매핑 담당을 잘못된 wave로 표기 | `attributes the repository mapping to the wave that owns it` |
+| TTL 미설정 영향을 앱·세션 기동 실패로 과장 | `scopes the unresolved TTL to couple creation and invite issuance` |
 
 꽃갈피 7종은 `src/data/fixtures.js`의 `FLOWERS`를 **직접 import해서** 시드와 비교한다.
 프런트엔드에 꽃을 추가하면 마이그레이션을 고치지 않는 한 테스트가 깨진다.
@@ -154,9 +169,14 @@ app (PostgREST에 노출되지 않는 내부 스키마)
 이 검사를 **가장 먼저** 수행한다 — 기존 활성 코드를 revoke하거나 새 행을 insert하기 전에.
 설정이 틀렸다고 커플이 쓰던 코드가 날아가면 안 되기 때문이다.
 
-결과적으로 **게이트 값이 정해지기 전에는 `create_couple`이 TW014로 실패한다.** 이건
-의도한 동작이다. 유효기간 없는 6자리 코드를 무기한 살려 두는 것보다 낫다. 온보딩
-"시작하기"가 아예 동작하지 않으므로, 이 값은 **런치 전 가장 먼저 정해야 하는 값**이다.
+결과적으로 **게이트 값이 정해지기 전에는 커플 생성과 초대 코드 발급이 TW014로 실패한다** —
+`create_couple`과 `reissue_couple_invite`, 즉 코드를 발급하는 경로만이다. 이건 의도한
+동작이고, 유효기간 없는 6자리 코드를 무기한 살려 두는 것보다 낫다.
+
+**범위를 정확히 말하면**: 앱이나 세션이 뜨지 않는 것이 아니다. 익명 세션 생성, 프로필
+이름 입력(`upsert_my_profile`), 기존 커플의 모든 조회·기록·사진·위시리스트 동작은 영향을
+받지 않는다. 막히는 것은 **온보딩에서 새 커플을 만들거나 초대 코드를 발급하는 두 호출**이다.
+그래도 신규 사용자가 커플을 시작할 수 없으므로 **런치 전 가장 먼저 정해야 하는 값**이다.
 
 `expires_at`은 `not null`이라, 설정 검사를 우회하는 경로가 생겨도 유효기간 없는 코드는
 저장 자체가 되지 않는다.
@@ -166,7 +186,7 @@ app (PostgREST에 노출되지 않는 내부 스키마)
 다른 이야기를 하게 된다. 지금은 `status='expired'` + `expired_at`이고, 활성 코드를
 못 찾은 뒤 실행되는 조회 분기가 consumed / expired / revoked 세 갈래로 갈린다.
 
-## RPC 계약 (W1-B 데이터 레이어가 쓸 부분)
+## RPC 계약 (W1-C 데이터 레이어가 쓸 부분)
 
 모든 클라이언트 RPC는 `jsonb` 봉투를 반환한다.
 
@@ -387,7 +407,7 @@ SQL 안에는 어떤 하드코딩도 없다.
 
 | key | 현재 | 정해지지 않으면 |
 | --- | --- | --- |
-| `invite_ttl_seconds` | **null (미정)** | **`create_couple`이 TW014로 실패한다. 온보딩이 동작하지 않는다.** 최우선 |
+| `invite_ttl_seconds` | **null (미정)** | **커플 생성과 초대 코드 발급이 TW014로 실패한다** (`create_couple` / `reissue_couple_invite`). 다른 화면·조회는 정상. 최우선 |
 | `photo_max_bytes` | **null (미정)** | 버킷 `file_size_limit`이 null이라 프로젝트 기본값이 적용된다 |
 | `photo_allowed_mime_types` | **null (미정)** | 버킷 `allowed_mime_types`가 null이라 형식 제한이 없다 |
 | `invite_attempt_max` | 10 (임시) | 임시값으로 동작한다 |
@@ -428,9 +448,11 @@ update storage.buckets set file_size_limit = <bytes>, allowed_mime_types = array
 
 ## 남은 위험
 
-1. **`invite_ttl_seconds`가 미설정이면 앱이 시작되지 않는다.** 이건 버그가 아니라
-   fail-closed 설계지만, 게이트에서 이 값을 정하지 않으면 온보딩 "시작하기"가 TW014로
-   막힌다. 통합·QA 전에 반드시 설정할 것.
+1. **`invite_ttl_seconds`가 미설정이면 커플 생성과 초대 코드 발급이 막힌다.** 앱이나
+   세션이 뜨지 않는 것이 아니라 `create_couple`·`reissue_couple_invite` 두 호출만
+   TW014로 실패한다 — 온보딩의 "시작하기"와 코드 재발급이 여기에 해당한다. 버그가 아니라
+   fail-closed 설계지만, 신규 사용자가 커플을 시작할 수 없으므로 통합·QA 전에 반드시
+   설정할 것.
 2. **시도 제한이 사용자 단위다.** 익명 세션은 얼마든지 새로 만들 수 있어서, 세션을 계속
    갈아타는 공격자에게는 무력하다. IP나 디바이스 단위 제한은 이 레이어에서 불가능하다 —
    Edge Function이나 게이트웨이가 필요하다.
@@ -448,7 +470,7 @@ update storage.buckets set file_size_limit = <bytes>, allowed_mime_types = array
    참조하지 않으면 수동 정리가 필요하다.
 6. **`api.js` mock과 필드 이름이 다르다.** `entries[].text` ↔ `visit_entries.note`,
    `record.date` ↔ `visits.visited_at`, `record.rating`(기록 단위) ↔
-   `visit_entries.rating`(사용자 단위). W1-B가 매핑을 흡수해야 한다. 특히 mock은 별점을
+   `visit_entries.rating`(사용자 단위). **저장소 매핑은 W1-C가 담당한다.** 특히 mock은 별점을
    기록 단위로 들고 있는데 명세상 별점은 개인 데이터다. `create_visit`가 꽃갈피·태그를
    받지 않는 것도 mock의 `saveFiveSecondRecord` 시그니처와 다르다.
 7. **`replenishPendingRecord()`는 mock 전용이다.** 실제 백엔드로 바꿀 때 함께 지운다

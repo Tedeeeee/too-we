@@ -6,7 +6,7 @@
 -- Acceptance scenario 12 of the functional spec.
 
 begin;
-select plan(19);
+select plan(22);
 
 create extension if not exists pgtap;
 

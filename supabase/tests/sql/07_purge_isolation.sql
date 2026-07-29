@@ -11,7 +11,7 @@
 -- un-rate-limited the user's *new* couple and wiped a name they had just entered.
 
 begin;
-select plan(14);
+select plan(15);
 
 create extension if not exists pgtap;
 

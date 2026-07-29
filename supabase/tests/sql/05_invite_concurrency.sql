@@ -11,7 +11,7 @@
 -- for the two-session pgbench recipe.
 
 begin;
-select plan(17);
+select plan(19);
 
 create extension if not exists pgtap;
 
