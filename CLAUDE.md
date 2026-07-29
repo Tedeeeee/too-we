@@ -3,6 +3,23 @@
 커플 장소 기록 앱. 402×874 모바일 웹앱, Vite + React 19 + react-router 7.
 화면 구조·라우트 표는 `README.md`, 에셋 상세는 `design-assets/README.md` 참고.
 
+## Orca 작업 역할
+
+- **Claude는 구현 작업자다.** 배정받은 worktree에서 기능 코드, 테스트, 마이그레이션을 작성하고 검증한 뒤 커밋한다.
+- **Codex는 코디네이터·리뷰어·통합 담당자다.** 작업 DAG와 의존성을 관리하고, Claude 결과를 리뷰하며, 승인된 브랜치를 통합 worktree에 병합한다.
+- 리뷰에서 기능 수정이 필요하면 Claude가 다시 수정한다. Codex는 단순 병합 충돌을 해결할 수 있지만 동작 변경이 필요한 충돌은 Claude에게 재배정한다.
+- 기획에 없는 정책을 임의로 만들지 않는다. 막히면 Orca `ask`로 Codex에게 질문한다.
+- 작업 완료 시 수정 파일, 실행한 검증, 남은 위험을 포함해 Orca `worker_done`을 정확히 한 번 보낸다.
+- 상세 작업 규칙은 `docs/agent-workflow.md`, 기능 기준은 `docs/specs/2026-07-29-mvp-functional-spec.md`를 먼저 읽는다.
+
+## 기준 우선순위
+
+1. 기능 동작·상태·데이터·권한·오류 정책: 승인된 Notion 기획과 `docs/specs/2026-07-29-mvp-functional-spec.md`
+2. 화면 레이아웃·SVG·색상·간격: 현재 프로젝트 화면과 기존 디자인 에셋
+3. 과거 메모·프로토타입 mock 동작: 위 두 기준과 충돌하지 않을 때만 참고
+
+현재 화면을 임의로 재설계하지 않는다. 화면과 기능 정책이 충돌하면 시각 요소는 현재 화면을 유지하고 동작은 기능 명세를 따른다.
+
 ```bash
 npm run dev          # http://localhost:5173
 npm run build        # 변경 후 항상 통과 확인
