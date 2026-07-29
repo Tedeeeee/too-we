@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { palette, fonts } from '@/styles/tokens';
 import { RoseIllust } from '@assets/icons';
 import { etcSvg, onboardingSvg, uiSvg, svgSize } from '@assets/svg';

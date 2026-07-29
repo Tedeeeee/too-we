@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Navigate, useNavigate, useParams } from 'react-router-dom';
+import { Navigate, useNavigate, useParams } from 'react-router';
 import { palette, fonts } from '@/styles/tokens';
 import { uiSvg } from '@assets/svg';
 import Screen from '@/components/Screen';

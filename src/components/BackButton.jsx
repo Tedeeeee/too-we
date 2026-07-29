@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { palette } from '@/styles/tokens';
 import { uiSvg } from '@assets/svg';
 import MaskIcon from './MaskIcon';

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { palette, fonts } from '@/styles/tokens';
 import { uiSvg } from '@assets/svg';
 import Screen from '@/components/Screen';

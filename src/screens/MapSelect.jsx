@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { palette, fonts } from '@/styles/tokens';
 import Screen from '@/components/Screen';
 import MaskIcon from '@/components/MaskIcon';

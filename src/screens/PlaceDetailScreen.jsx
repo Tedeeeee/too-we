@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Navigate, useNavigate, useParams } from 'react-router-dom';
+import { Navigate, useNavigate, useParams } from 'react-router';
 import PlaceDetail from '@/components/PlaceDetail';
 import { useApp, useRecord } from '@/data/store';
 import { seasonFromDate } from '@/data/format';

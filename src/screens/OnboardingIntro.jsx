@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { palette, fonts, gradients } from '@/styles/tokens';
 import Screen from '@/components/Screen';
 import FigLogo from '@/components/FigLogo';

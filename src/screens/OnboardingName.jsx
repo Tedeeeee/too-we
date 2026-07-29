@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router';
 import { palette, fonts, gradients } from '@/styles/tokens';
 import { onboardingSvg } from '@assets/svg';
 import Screen from '@/components/Screen';
