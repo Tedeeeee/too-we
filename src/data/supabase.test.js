@@ -44,7 +44,17 @@ const expectConfigError = (fn) => {
 
 afterEach(() => {
   __resetSupabaseClient();
+  vi.unstubAllEnvs();
 });
+
+/**
+ * 워크스페이스에 `.env.local`이 있어서 Vite가 실제 설정을 넘겨주는 상황을 만든다.
+ * 값은 가짜지만 "ambient 환경에 설정이 존재한다"는 조건은 실제와 같다.
+ */
+const stubAmbientEnv = () => {
+  vi.stubEnv(SUPABASE_URL_ENV, FAKE_URL);
+  vi.stubEnv(PUBLISHABLE_KEY_ENV, FAKE_PUBLISHABLE);
+};
 
 describe('환경변수 이름', () => {
   it('브라우저에 노출해도 되는 두 변수만 쓴다', () => {
@@ -91,12 +101,62 @@ describe('readSupabaseConfig', () => {
 
   it('환경변수가 아예 없어도 던지기만 하고 크래시하지 않는다', () => {
     expectConfigError(() => readSupabaseConfig({}));
-    expectConfigError(() => readSupabaseConfig(undefined));
   });
 
   it('레거시 anon JWT는 허용한다', () => {
     const anon = fakeJwt('anon');
     expect(readSupabaseConfig(fakeEnv({ [PUBLISHABLE_KEY_ENV]: anon })).publishableKey).toBe(anon);
+  });
+});
+
+/**
+ * 회귀 방어: `readSupabaseConfig(env = defaultEnv())` 형태는 기본 인수 문법이
+ * "생략"과 "명시적 undefined"를 구분하지 못해서, 명시적 undefined도 ambient 환경을
+ * 읽어 버렸다. `.env.local`이 있는 워크스페이스에서는 실제 설정이 잡혀 던지지 않고,
+ * 없는 워크스페이스에서는 우연히 통과했다. 아래 테스트는 ambient에 설정이 있는
+ * 조건을 stub으로 고정해서 두 워크스페이스에서 같은 결과를 낸다.
+ */
+describe('ambient 환경 격리', () => {
+  it('명시적 undefined는 ambient 설정을 읽지 않는다', () => {
+    stubAmbientEnv();
+    expectConfigError(() => readSupabaseConfig(undefined));
+  });
+
+  it('명시적 빈 객체는 ambient 설정을 읽지 않는다', () => {
+    stubAmbientEnv();
+    expectConfigError(() => readSupabaseConfig({}));
+  });
+
+  it('인수를 생략하면 ambient 설정을 읽는다', () => {
+    stubAmbientEnv();
+    expect(readSupabaseConfig()).toEqual({
+      url: FAKE_URL,
+      publishableKey: FAKE_PUBLISHABLE,
+    });
+  });
+
+  it('createSupabaseClient에 env: undefined를 넘기면 ambient를 읽지 않는다', () => {
+    stubAmbientEnv();
+    const createClient = vi.fn(() => ({}));
+
+    expectConfigError(() => createSupabaseClient({ env: undefined, createClient }));
+    expect(createClient).not.toHaveBeenCalled();
+  });
+
+  it('createSupabaseClient에 env를 생략하면 ambient를 읽는다', () => {
+    stubAmbientEnv();
+    const createClient = vi.fn(() => ({}));
+    createSupabaseClient({ createClient });
+
+    expect(createClient.mock.calls[0][0]).toBe(FAKE_URL);
+    expect(createClient.mock.calls[0][1]).toBe(FAKE_PUBLISHABLE);
+  });
+
+  it('ambient에 설정이 있어도 명시적 env가 우선한다', () => {
+    stubAmbientEnv();
+    expectConfigError(() =>
+      readSupabaseConfig({ [SUPABASE_URL_ENV]: FAKE_URL, [PUBLISHABLE_KEY_ENV]: '' }),
+    );
   });
 });
 
