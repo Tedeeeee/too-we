@@ -67,12 +67,12 @@ export function AppProvider({ children }) {
 
   const actions = useMemo(
     () => ({
-      async startNewCouple() {
-        const nextCouple = await api.createCouple();
+      async startNewCouple(options) {
+        const nextCouple = await api.createCouple(options);
         if (mountedRef.current) setCouple(nextCouple);
       },
-      async connectWithCode(code) {
-        const nextCouple = await api.connectWithCode(code);
+      async connectWithCode(code, options) {
+        const nextCouple = await api.connectWithCode(code, options);
         if (mountedRef.current) setCouple(nextCouple);
       },
       async setMyName(name) {
