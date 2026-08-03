@@ -1,14 +1,65 @@
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { palette, fonts, gradients } from '@/styles/tokens';
 import Screen from '@/components/Screen';
 import FigLogo from '@/components/FigLogo';
 import PrimaryButton from '@/components/PrimaryButton';
 import { useApp } from '@/data/store';
+import { onboardingError } from './onboarding-errors';
+
+const newRequestKey = () => {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  return `onboarding-create-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
 
 /** onboarding1 — 서비스 소개 + 두 갈래 진입(시작하기 / 초대코드) */
 export default function OnboardingIntro() {
   const navigate = useNavigate();
-  const { startNewCouple } = useApp();
+  const { couple, startNewCouple } = useApp();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState(null);
+  const inFlightRef = useRef(false);
+  const requestKeyRef = useRef(null);
+
+  useEffect(() => {
+    if (!couple?.coupleId) return;
+
+    if (couple.connected && couple.onboarded) {
+      navigate('/', { replace: true });
+      return;
+    }
+
+    if (couple.me?.name && !couple.connected) {
+      navigate('/onboarding/share', { replace: true });
+      return;
+    }
+
+    navigate('/onboarding/name', {
+      replace: true,
+      state: { invited: Boolean(couple.connected && !couple.inviteCode) },
+    });
+  }, [couple, navigate]);
+
+  const handleStart = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setPending(true);
+    setError(null);
+    requestKeyRef.current ??= newRequestKey();
+
+    try {
+      await startNewCouple({ requestKey: requestKeyRef.current });
+      requestKeyRef.current = null;
+      navigate('/onboarding/name', { state: { invited: false } });
+    } catch (nextError) {
+      const nextOnboardingError = onboardingError(nextError, 'start');
+      if (!nextOnboardingError.retryable) requestKeyRef.current = null;
+      setError(nextOnboardingError);
+    } finally {
+      inFlightRef.current = false;
+      setPending(false);
+    }
+  };
 
   return (
     <Screen bg={gradients.onboarding}>
@@ -43,18 +94,39 @@ export default function OnboardingIntro() {
         <br />
         우리가 머문 자리에 꽃갈피를 꽂아주세요
       </div>
-      <PrimaryButton
-        label="시작하기"
-        left={22}
-        top={744}
-        width={358}
-        textColor={palette.onOliveAlt}
-        onClick={async () => {
-          await startNewCouple();
-          navigate('/onboarding/name', { state: { invited: false } });
-        }}
-      />
+      {error && (
+        <p
+          role="alert"
+          style={{
+            position: 'absolute',
+            left: 32,
+            top: 650,
+            width: 338,
+            margin: 0,
+            textAlign: 'center',
+            fontFamily: fonts.sans,
+            fontSize: 15,
+            lineHeight: 1.45,
+            color: palette.text,
+          }}
+        >
+          {error.message}
+        </p>
+      )}
+      <fieldset disabled={pending} style={{ display: 'contents' }}>
+        <PrimaryButton
+          label={pending ? '시작하는 중…' : error?.retryable ? '다시 시도' : '시작하기'}
+          left={22}
+          top={744}
+          width={358}
+          disabled={pending}
+          textColor={palette.onOliveAlt}
+          onClick={handleStart}
+        />
+      </fieldset>
       <button
+        type="button"
+        disabled={pending}
         onClick={() => navigate('/onboarding/code')}
         style={{
           position: 'absolute',
