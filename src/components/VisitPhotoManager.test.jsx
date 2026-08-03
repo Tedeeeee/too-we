@@ -117,28 +117,74 @@ describe('VisitPhotoManager uploads', () => {
     expect(await screen.findByLabelText('a.jpg 업로드 상태')).toHaveTextContent('업로드 완료');
   });
 
-  it('진행 중인 다른 배치의 결과로 재시도한 사진을 성공 처리하지 않는다', async () => {
-    const user = userEvent.setup();
+  it('업로드 중에는 실패분 재시도를 막아 진행 중인 배치 결과로 성공 처리하지 않는다', async () => {
     const a = file('a.jpg');
     const b = file('b.jpg');
     const failedB = failed(b, 'client-b');
     const pending = deferred();
     // 스토어는 기록당 업로드를 하나만 돌린다. 이미 진행 중이면 넘긴 입력을 무시하고
     // 먼저 시작한 배치의 promise를 그대로 돌려준다(store.jsx runPhotoUploads).
+    // 그래서 재시도를 눌리게 두면 올리지 않은 파일이 남의 결과로 성공 처리된다.
     const addPhotos = vi.fn().mockReturnValue(pending.promise);
     renderManager({ uploads: [failedB], addPhotos });
 
     fireEvent.change(screen.getByLabelText('사진 추가'), { target: { files: [a] } });
     expect(addPhotos).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'b.jpg 다시 시도' })).toBeDisabled();
 
-    await user.click(screen.getByRole('button', { name: 'b.jpg 다시 시도' }));
     await act(async () => pending.resolve([succeeded(a, 'client-a', 'photo-a')]));
 
+    expect(addPhotos).toHaveBeenCalledTimes(1);
     expect(screen.getByLabelText('a.jpg 업로드 상태')).toHaveTextContent('업로드 완료');
     const retriedB = screen.getByLabelText('b.jpg 업로드 상태');
     expect(retriedB).not.toHaveTextContent('업로드 완료');
     expect(retriedB).toHaveTextContent('네트워크 연결이 불안정해요');
-    expect(screen.getByRole('button', { name: 'b.jpg 다시 시도' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'b.jpg 다시 시도' })).not.toBeDisabled();
+  });
+
+  it('재시도가 진행되는 동안 사진 추가와 다른 재시도를 busy 상태로 막고 진행분을 유지한다', async () => {
+    const user = userEvent.setup();
+    const b = file('b.jpg');
+    const c = file('c.jpg');
+    const failedB = failed(b, 'client-b');
+    const failedC = failed(c, 'client-c');
+    const pending = deferred();
+    const addPhotos = vi.fn().mockReturnValue(pending.promise);
+    renderManager({ uploads: [failedB, failedC], addPhotos });
+
+    await user.click(screen.getByRole('button', { name: 'b.jpg 다시 시도' }));
+    expect(addPhotos).toHaveBeenCalledTimes(1);
+
+    // 재시도도 같은 업로드 슬롯을 쓴다. 추가 경로를 열어 두면 고른 파일이 조용히 버려진다.
+    expect(screen.getByLabelText('사진 추가')).toBeDisabled();
+    expect(screen.getByRole('button', { name: '사진 올리는 중…' })).toBeDisabled();
+    // 다른 실패분의 재시도도 같은 게이트에 막히므로 눌리는 것처럼 보이면 안 된다.
+    expect(screen.getByRole('button', { name: 'c.jpg 다시 시도' })).toBeDisabled();
+    // 막는 동안에도 각 파일의 진행 상태는 그대로 남는다.
+    expect(screen.getByLabelText('b.jpg 업로드 상태')).toHaveTextContent('압축·업로드 중');
+    expect(screen.getByLabelText('c.jpg 업로드 상태')).toHaveTextContent('네트워크 연결이 불안정해요');
+
+    await act(async () => pending.resolve([succeeded(b, 'client-b', 'photo-b')]));
+
+    expect(await screen.findByLabelText('b.jpg 업로드 상태')).toHaveTextContent('업로드 완료');
+    expect(screen.getByLabelText('사진 추가')).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'c.jpg 다시 시도' })).not.toBeDisabled();
+  });
+
+  it('재시도 결과를 clientId로 대조해 다른 파일의 결과로 성공 처리하지 않는다', async () => {
+    const user = userEvent.setup();
+    const b = file('b.jpg');
+    const failedB = failed(b, 'client-b');
+    // 이 재시도의 clientId가 없는 배치가 돌아오면 확정된 것이 아니다.
+    const addPhotos = vi.fn().mockResolvedValue([succeeded(file('a.jpg'), 'client-a', 'photo-a')]);
+    renderManager({ uploads: [failedB], addPhotos });
+
+    await user.click(screen.getByRole('button', { name: 'b.jpg 다시 시도' }));
+
+    const retriedB = await screen.findByLabelText('b.jpg 업로드 상태');
+    expect(retriedB).not.toHaveTextContent('업로드 완료');
+    expect(retriedB).toHaveTextContent('네트워크 연결이 불안정해요');
+    expect(screen.getByRole('button', { name: 'b.jpg 다시 시도' })).not.toBeDisabled();
   });
 
   it('replaces a successful upload status card with refreshed server photo truth', () => {

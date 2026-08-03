@@ -141,6 +141,9 @@ export default function VisitPhotoManager({
     ) return;
     retryingUploadsRef.current.add(attempt.uiKey);
     uploadInFlightRef.current = true;
+    // 재시도도 같은 업로드 슬롯을 쓴다. 같은 busy 상태를 켜서 추가·다른 재시도가
+    // 눌리는 것처럼 보인 뒤 조용히 버려지지 않게 한다.
+    setUploading(true);
     setAttempts((current) => current.map((item) => (
       item.uiKey === attempt.uiKey ? { ...item, status: 'processing' } : item
     )));
@@ -156,6 +159,7 @@ export default function VisitPhotoManager({
     } finally {
       retryingUploadsRef.current.delete(attempt.uiKey);
       uploadInFlightRef.current = false;
+      setUploading(false);
     }
   };
 
@@ -305,7 +309,7 @@ export default function VisitPhotoManager({
               <span style={{ width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: palette.textMuted }}>{fileName}</span>
               <span style={{ marginTop: 6, lineHeight: 1.25 }}>{uploadLabel(attempt)}</span>
               {attempt.status === 'failed' && (
-                <button type="button" aria-label={`${fileName} 다시 시도`} disabled={disabled} onClick={() => retryUpload(attempt)} style={{ marginTop: 7, padding: '4px 8px', borderRadius: 999, background: palette.olive, color: palette.onOlive, fontFamily: fonts.sans, fontSize: 11 }}>
+                <button type="button" aria-label={`${fileName} 다시 시도`} disabled={disabled || uploading} onClick={() => retryUpload(attempt)} style={{ marginTop: 7, padding: '4px 8px', borderRadius: 999, background: palette.olive, color: palette.onOlive, fontFamily: fonts.sans, fontSize: 11 }}>
                   다시 시도
                 </button>
               )}
