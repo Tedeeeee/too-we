@@ -132,20 +132,34 @@ export default function VisitPhotoManager({
     if (
       attempt.status !== 'failed'
       || !result
+      // 업로드는 기록당 하나만 진행된다. 진행 중에 재시도를 보내면 스토어가 이 입력을
+      // 무시하고 먼저 시작한 배치의 promise를 돌려주므로, 이 파일을 올리지 않았는데도
+      // 그 배치 결과로 성공 처리될 수 있다. 실패 상태로 남겨 다시 시도할 수 있게 둔다.
+      || uploadInFlightRef.current
       || retryingUploadsRef.current.has(attempt.uiKey)
       || typeof addPhotos !== 'function'
     ) return;
     retryingUploadsRef.current.add(attempt.uiKey);
+    uploadInFlightRef.current = true;
+    // 재시도도 같은 업로드 슬롯을 쓴다. 같은 busy 상태를 켜서 추가·다른 재시도가
+    // 눌리는 것처럼 보인 뒤 조용히 버려지지 않게 한다.
+    setUploading(true);
     setAttempts((current) => current.map((item) => (
       item.uiKey === attempt.uiKey ? { ...item, status: 'processing' } : item
     )));
     try {
-      const [retried] = await addPhotos(recordId, [result]);
+      const results = await addPhotos(recordId, [result]);
+      // 위치가 아니라 clientId로 찾는다 — 다른 배치의 결과를 이 파일의 것으로 읽지 않게.
+      const retried = Array.isArray(results)
+        ? results.find((item) => item?.clientId === result.clientId)
+        : null;
       replaceAttempt(attempt.uiKey, retried || { ...result, status: 'failed' });
     } catch (error) {
       replaceAttempt(attempt.uiKey, { ...result, status: 'failed', error: toAppError(error) });
     } finally {
       retryingUploadsRef.current.delete(attempt.uiKey);
+      uploadInFlightRef.current = false;
+      setUploading(false);
     }
   };
 
@@ -295,7 +309,7 @@ export default function VisitPhotoManager({
               <span style={{ width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: palette.textMuted }}>{fileName}</span>
               <span style={{ marginTop: 6, lineHeight: 1.25 }}>{uploadLabel(attempt)}</span>
               {attempt.status === 'failed' && (
-                <button type="button" aria-label={`${fileName} 다시 시도`} disabled={disabled} onClick={() => retryUpload(attempt)} style={{ marginTop: 7, padding: '4px 8px', borderRadius: 999, background: palette.olive, color: palette.onOlive, fontFamily: fonts.sans, fontSize: 11 }}>
+                <button type="button" aria-label={`${fileName} 다시 시도`} disabled={disabled || uploading} onClick={() => retryUpload(attempt)} style={{ marginTop: 7, padding: '4px 8px', borderRadius: 999, background: palette.olive, color: palette.onOlive, fontFamily: fonts.sans, fontSize: 11 }}>
                   다시 시도
                 </button>
               )}
