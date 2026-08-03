@@ -192,9 +192,9 @@ const checks = [
       && /data-home-month-list[\s\S]*?top:\s*336[\s\S]*?height:\s*538/.test(home),
   },
   {
-    name: 'Home: refreshed bookmark CTA',
+    name: 'Home: refreshed pending line CTA',
     pass: /data-home-cta/.test(homeCta)
-      && /꽃갈피를 남겨주세요/.test(homeCta)
+      && /한 줄을 남겨주세요/.test(homeCta)
       && /fontFamily:\s*fonts\.hand/.test(homeCta)
       && /left:\s*41/.test(homeCta)
       && /top:\s*152/.test(homeCta)
@@ -202,7 +202,7 @@ const checks = [
       && /height:\s*36/.test(homeCta)
       && /width=\{22\}/.test(homeCta)
       && /height=\{22\}/.test(homeCta)
-      && !/한 줄 남기기/.test(home),
+      && !/꽃갈피를 남겨주세요/.test(homeCta),
   },
   {
     name: 'Home: redundant waiting caption removed',

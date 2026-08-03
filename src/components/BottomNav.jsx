@@ -24,7 +24,7 @@ import MaskIcon from './MaskIcon';
  */
 const ICON = 24;
 
-export default function BottomNav({ onMap, onHome }) {
+export default function BottomNav({ onAdd, onMap, onHome }) {
   return (
     <div
       style={{
@@ -65,7 +65,7 @@ export default function BottomNav({ onMap, onHome }) {
         {/* 가운데 52px 슬롯 — FAB이 알약 위로 22px 튀어나온다 */}
         <div style={{ position: 'relative', width: 52, flexShrink: 0, alignSelf: 'stretch' }}>
           <button
-            onClick={onMap}
+            onClick={onAdd}
             aria-label="새 기록"
             style={{
               position: 'absolute',
