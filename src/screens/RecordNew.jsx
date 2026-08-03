@@ -7,6 +7,7 @@ import MaskIcon from '@/components/MaskIcon';
 import BackButton from '@/components/BackButton';
 import PrimaryButton from '@/components/PrimaryButton';
 import FlowerRating from '@/components/FlowerRating';
+import VisitPhotoManager from '@/components/VisitPhotoManager';
 import { useApp, useRecord } from '@/data/store';
 import { toAppError, userMessage } from '@/data/errors';
 import { formatRecordDate } from '@/data/format';
@@ -278,6 +279,11 @@ function PendingRecordCompletion({
   pendingRecord,
   recordId,
   updateRecord,
+  addVisitPhotos,
+  deleteVisitPhoto,
+  retryDeleteVisitPhoto,
+  photoUploads,
+  photoDeletes,
 }) {
   const myEntry = pendingRecord.entries?.find((entry) => entry.memberId === 'me');
   const partnerEntry = pendingRecord.entries?.find((entry) => entry.memberId === 'partner');
@@ -348,19 +354,17 @@ function PendingRecordCompletion({
         <MaskIcon src={etcSvg.pencil} color={palette.textMuted} size={16} />
       </div>
       <fieldset disabled={saving} style={{ display: 'contents' }}>
-        <div style={{ position: 'absolute', left: 16, top: 226, width: 370, height: 230, borderRadius: 24, background: palette.beige }} />
-        <button
-          type="button"
-          style={{ position: 'absolute', left: 145, top: 319, width: 112, height: 44, background: palette.card, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: fonts.sans, fontSize: 16, fontWeight: 500, color: palette.textMuted, cursor: 'pointer' }}
-        >
-          사진 추가
-        </button>
-        <div style={{ position: 'absolute', left: 16, top: 468, display: 'flex', flexDirection: 'row', gap: 8 }}>
-          <div style={{ position: 'relative', width: 44, height: 44, borderRadius: 10, background: palette.beige }}>
-            <img src={uiSvg.cancelCircle} width={22} height={22} alt="" style={{ position: 'absolute', left: 11, top: 11, display: 'block', cursor: 'pointer' }} />
-          </div>
-          <div style={{ width: 44, height: 44, borderRadius: 10, background: palette.beige }} />
-        </div>
+        <VisitPhotoManager
+          recordId={recordId}
+          photos={pendingRecord.photos}
+          uploads={photoUploads}
+          deleteStates={photoDeletes}
+          addPhotos={addVisitPhotos}
+          deletePhoto={deleteVisitPhoto}
+          retryDeletePhoto={retryDeleteVisitPhoto}
+          disabled={saving}
+          style={{ left: 16, top: 226, width: 370, height: 286 }}
+        />
         <div style={{ position: 'absolute', left: 0, top: 534, width: 402, textAlign: 'center', fontFamily: fonts.hand, fontSize: 20, color: palette.text }}>
           오늘 이곳에서 우리는?
         </div>
@@ -496,7 +500,16 @@ function PendingRecordCompletion({
 export default function RecordNew() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { ready, saveFiveSecondRecord, updateRecord } = useApp();
+  const {
+    ready,
+    saveFiveSecondRecord,
+    updateRecord,
+    addVisitPhotos,
+    deleteVisitPhoto,
+    retryDeleteVisitPhoto,
+    photoUploadsByRecord,
+    photoDeletesByRecord,
+  } = useApp();
   const { recordId } = location.state || {};
   const pendingRecord = useRecord(recordId);
 
@@ -509,6 +522,11 @@ export default function RecordNew() {
         pendingRecord={pendingRecord}
         recordId={recordId}
         updateRecord={updateRecord}
+        addVisitPhotos={addVisitPhotos}
+        deleteVisitPhoto={deleteVisitPhoto}
+        retryDeleteVisitPhoto={retryDeleteVisitPhoto}
+        photoUploads={photoUploadsByRecord?.[recordId] ?? []}
+        photoDeletes={photoDeletesByRecord?.[recordId] ?? {}}
       />
     );
   }
