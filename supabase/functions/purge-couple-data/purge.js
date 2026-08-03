@@ -154,10 +154,15 @@ const validateJob = (value) => {
   ) {
     fail('invalid_job_envelope');
   }
+  // The object list is checked later, per job, inside processJob. Rejecting it
+  // here would abort the whole claimed batch: claim_purge_jobs has already moved
+  // every job in it to 'running', and a claim only ever reconsiders 'queued', so
+  // an unreported rejection strands the job and its batch companions for good.
+  // A job whose scalars are this well formed has a job_id we can settle with.
   return {
     jobId: value.job_id,
     coupleId: value.couple_id,
-    objects: value.objects.map((object) => validateQueuedObject(object, value.couple_id)),
+    objects: value.objects,
   };
 };
 
@@ -378,7 +383,15 @@ export function createPurgeHandler({
 
     const processJob = async (job) => {
       try {
-        for (const object of job.objects) {
+        // Validated inside the try so a rejected object is reported against this
+        // job — requeued, or parked as failed once the attempt budget is spent —
+        // instead of leaving it in 'running' with no outcome. Validated before any
+        // deletion so a job carrying one bad reference deletes nothing at all.
+        const objects = job.objects.map((object) =>
+          validateQueuedObject(object, job.coupleId),
+        );
+
+        for (const object of objects) {
           if (object.isPrefix) {
             await deletePrefix(job.jobId, object);
           } else {

@@ -24,6 +24,7 @@ import {
   countPgTapPlan,
   createTables,
   createdTableNames,
+  effectiveFunction,
   functions,
   functionsNamed,
   grants,
@@ -638,11 +639,61 @@ describe('disconnect and purge', () => {
   });
 
   it('makes a queued job eligible immediately, not at its due date', () => {
-    const [claim] = functionsNamed('public.claim_purge_jobs');
+    // The effective definition, not the first: claim_purge_jobs is replaced by a
+    // later migration, and it is the live one that has to hold this property.
+    const claim = effectiveFunction('public.claim_purge_jobs');
     expect(claim).toBeDefined();
     expect(claim.body).toMatch(/status\s*=\s*'queued'/i);
     // due_at is the completion target, never a gate on picking the job up.
     expect(claim.body).not.toMatch(/due_at\s*(<|<=|>|>=)/);
+  });
+
+  it('can reclaim a job left running by a worker that never reported back', () => {
+    // claim_purge_jobs moves a job to running before the worker touches anything.
+    // If that process exits without calling complete_purge_job — a crash, a
+    // function timeout, or the worker's own `unsettled` outcome — the row keeps
+    // status = 'running' and nothing moves it again, because the claim only ever
+    // looked at queued rows. The spec requires a failed deletion to be retried
+    // and to stay operationally traceable, so a stranded job has to become
+    // claimable again.
+    const claim = effectiveFunction('public.claim_purge_jobs');
+    expect(claim).toBeDefined();
+    expect(claim.body, 'a stranded running job is never reconsidered').toMatch(/'running'/);
+    expect(claim.body, 'staleness is measured from the claim, not the completion target').toMatch(
+      /started_at/,
+    );
+    // The lease length is an operating value. A literal here would be an invented
+    // policy, exactly what app.config exists to avoid.
+    expect(claim.body, 'a hardcoded lease length is an invented operating value').not.toMatch(
+      /interval\s+'\d/i,
+    );
+    expect(claim.body).toMatch(/purge_lease_seconds/);
+  });
+
+  it('leaves the reclaim lease at the external gate instead of inventing one', () => {
+    // Same rule as every other deferred value: unresolved means the mechanism
+    // stays inert rather than running on a number nobody agreed to.
+    const seeds = inserts().filter((i) => i.table === 'app.config');
+    expect(seeds.length).toBeGreaterThan(0);
+    const seed = seeds.find((s) => s.code.includes("'purge_lease_seconds'"));
+    expect(seed, 'purge_lease_seconds is not seeded in app.config').toBeDefined();
+    expect(seed.code).toMatch(/EXTERNAL GATE/i);
+
+    // And the reader must honour `resolved`, not just a present value.
+    const reader = functions().find((f) => /config_resolved_seconds/i.test(f.name));
+    expect(reader, 'no reader that requires resolved = true').toBeDefined();
+    expect(reader.body).toMatch(/resolved/);
+
+    // A resolved but unusable value must read as absent, not raise and not be
+    // silently reinterpreted. `'1.5'::integer` raises 22P02 rather than rounding,
+    // and a raise inside claim_purge_jobs takes the whole worker down with it.
+    expect(reader.body, 'a fractional lease is not rejected').toMatch(/floor/i);
+    expect(reader.body, 'an unusable value is not reported as absent').toMatch(
+      /return\s+null/i,
+    );
+    // Sequential checks, so the numeric cast cannot be evaluated for a row whose
+    // type or range test has not been applied.
+    expect(reader.language).toBe('plpgsql');
   });
 
   /* -- a purge must not reach past the couple it belongs to ---------------- */
@@ -754,6 +805,104 @@ describe('photo path and ownership contract', () => {
     );
     expect(photo.body).toMatch(/validation_error/);
     expect(photo.body).toMatch(/'visit-photos'/);
+  });
+
+  it('enforces the canonical object reference on the table, not only in the RPC', () => {
+    // register_visit_photo is not the only writer: the browser holds a direct
+    // insert grant plus an insert policy that asks for nothing but its own
+    // uploader_id and a readable visit. So a member can write a metadata row
+    // naming any bucket and any path, and the RPC's own path validation never
+    // runs. That row is not inert — disconnect_couple snapshots exactly these
+    // two columns into app.purge_job_objects for the service-role worker, so an
+    // unchecked value here decides what a privileged process is later asked to
+    // delete.
+    const clientInsert = grants().some(
+      (g) =>
+        /\binsert\b/i.test(g.code) &&
+        /\bpublic\.visit_photos\b/i.test(g.code) &&
+        g.roles.includes('authenticated'),
+    );
+    expect(clientInsert, 'no direct client insert, so the RPC really is the only writer').toBe(
+      true,
+    );
+
+    const guard = functions().find((f) => /guard_visit_photo_object/i.test(f.name));
+    expect(guard, 'no table level guard on the object reference').toBeDefined();
+    // Definer: it has to read the visit's true couple_id past RLS, and raise_error
+    // is not executable by a client role.
+    expect(guard.securityDefiner).toBe(true);
+    expect(guard.body, 'the bucket is unpinned').toMatch(/'visit-photos'/);
+    expect(guard.body).toMatch(/string_to_array/i);
+    expect(guard.body).toMatch(/array_length\s*\([\s\S]{0,40}(<>|=)\s*3/);
+    expect(guard.body, 'the couple segment is unchecked').toMatch(/couple_id/);
+    expect(guard.body, 'the visit segment is unchecked').toMatch(
+      /\[\s*2\s*\][\s\S]{0,80}visit_id|visit_id[\s\S]{0,80}\[\s*2\s*\]/,
+    );
+
+    const trigger = statements().find(
+      (st) =>
+        /create\s+trigger/i.test(st.code) &&
+        /before\s+insert[\s\S]{0,24}on\s+public\.visit_photos\b/i.test(st.code) &&
+        /guard_visit_photo_object/i.test(st.code),
+    );
+    expect(trigger, 'the object guard is not wired to visit_photos inserts').toBeDefined();
+  });
+
+  it('rejects every path shape the privileged worker would refuse', () => {
+    // The bar is not the RPC's check, it is what the service-role worker accepts.
+    // A path the worker refuses is exactly what strands a job — it cannot delete
+    // it and the refusal costs the couple its 24 hour deletion guarantee — so
+    // anything validPath() rejects must never reach a metadata row.
+    const guard = functions().find((f) => /guard_visit_photo_object/i.test(f.name));
+    expect(guard, 'no table level guard on the object reference').toBeDefined();
+
+    expect(guard.body, 'control characters are accepted').toMatch(/\[\[:cntrl:\]\]/);
+    expect(guard.body, 'backslashes are accepted').toMatch(
+      /strpos\s*\(\s*new\.storage_path/i,
+    );
+    expect(guard.body, "'.' and '..' filenames are accepted").toMatch(
+      /'\.'[\s\S]{0,24}'\.\.'/,
+    );
+
+    // Canonical text, not a uuid-valued comparison: app.try_uuid treats braces,
+    // uppercase and a hyphenless form as the same uuid, but the worker compares
+    // the `<couple_id>/` prefix byte for byte.
+    expect(guard.body).toMatch(/v_couple_id::text/);
+    expect(guard.body).toMatch(/visit_id::text/);
+    expect(
+      guard.body,
+      'a uuid-valued segment test lets an uppercase or hyphenless prefix through',
+    ).not.toMatch(/try_uuid/);
+
+    // The length bound is read off the worker rather than restated, so the two
+    // cannot drift apart silently.
+    const worker = readFileSync(
+      join(SUPABASE_DIR, 'functions', 'purge-couple-data', 'purge.js'),
+      'utf8',
+    );
+    const bound = /value\.length\s*>\s*(\d+)/.exec(worker);
+    expect(bound, 'purge.js no longer bounds the object path length').not.toBeNull();
+    // octet_length, not char_length. The worker bounds `value.length`, which is a
+    // count of UTF-16 code units; char_length counts characters, so 600 emoji pass
+    // a char_length bound of 1024 and then fail the worker's at 1200. UTF-8 octets
+    // are never fewer than UTF-16 code units, so an octet bound cannot be looser.
+    expect(
+      guard.body,
+      `the worker refuses a path over ${bound?.[1]} UTF-16 units; an octet bound is the safe mirror`,
+    ).toMatch(new RegExp(`octet_length\\s*\\(\\s*new\\.storage_path\\s*\\)\\s*>\\s*${bound[1]}`));
+    expect(
+      guard.body,
+      'char_length counts characters, so it is looser than the worker for non-BMP text',
+    ).not.toMatch(/char_length\s*\(\s*new\.storage_path/);
+
+    // And the worker side must still be the thing being mirrored.
+    expect(worker, 'the worker stopped rejecting backslashes').toMatch(/includes\('\\\\'\)/);
+    expect(worker, 'the worker stopped rejecting control characters').toMatch(
+      /\[\\u0000-\\u001f\\u007f\]/,
+    );
+    expect(worker, 'the worker stopped rejecting . and .. segments').toMatch(
+      /segment === '\.'\s*\|\|\s*segment === '\.\.'/,
+    );
   });
 
   it('requires both the couple and a readable visit to write an object', () => {
