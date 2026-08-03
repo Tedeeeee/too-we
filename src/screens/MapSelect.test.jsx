@@ -212,6 +212,30 @@ describe('MapSelect keyword search', () => {
     expect(screen.getByRole('button', { name: resultName(SECOND_PLACE) })).toBeInTheDocument();
   });
 
+  it('A-B-A 검색 순서에서 마지막 A 의도가 최종 결과를 결정한다', async () => {
+    const user = userEvent.setup();
+    const firstA = deferred();
+    const requestB = deferred();
+    api.getNearbyPlaces
+      .mockReturnValueOnce(firstA.promise)
+      .mockReturnValueOnce(requestB.promise);
+    renderMap();
+
+    await submitKeyword(user, 'A');
+    await submitKeyword(user, 'B');
+    await submitKeyword(user, 'A');
+
+    expect(api.getNearbyPlaces).toHaveBeenCalledTimes(2);
+
+    await act(async () => firstA.resolve([{ ...PLACE }]));
+    await act(async () => requestB.resolve([{ ...SECOND_PLACE }]));
+
+    expect(
+      await screen.findByRole('button', { name: resultName(PLACE) }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: resultName(SECOND_PLACE) })).not.toBeInTheDocument();
+  });
+
   it('같은 검색이 처리 중일 때 중복 submit을 한 요청으로 억제한다', async () => {
     const pending = deferred();
     api.getNearbyPlaces.mockReturnValue(pending.promise);

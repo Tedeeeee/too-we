@@ -43,7 +43,7 @@ export default function MapSelect() {
   const [userLocation, setUserLocation] = useState(null);
   const [locationMessage, setLocationMessage] = useState('현재 위치를 확인하고 있어요.');
   const requestSequenceRef = useRef(0);
-  const inFlightSearchesRef = useRef(new Set());
+  const inFlightSearchesRef = useRef(new Map());
   const lastSubmittedKeywordRef = useRef('');
   const mountedRef = useRef(true);
   const geolocationRequestedRef = useRef(false);
@@ -121,17 +121,28 @@ export default function MapSelect() {
       ...(userLocation ? { lat: userLocation.lat, lng: userLocation.lng } : {}),
     };
     const requestKey = JSON.stringify(query);
-    if (inFlightSearchesRef.current.has(requestKey)) return;
+    const inFlightSearch = inFlightSearchesRef.current.get(requestKey);
+    if (inFlightSearch) {
+      if (inFlightSearch.requestId === requestSequenceRef.current) return;
 
-    inFlightSearchesRef.current.add(requestKey);
+      const requestId = requestSequenceRef.current + 1;
+      requestSequenceRef.current = requestId;
+      inFlightSearch.requestId = requestId;
+      lastSubmittedKeywordRef.current = trimmedKeyword;
+      setSearchState('loading');
+      return;
+    }
+
     const requestId = requestSequenceRef.current + 1;
     requestSequenceRef.current = requestId;
+    const requestState = { requestId };
+    inFlightSearchesRef.current.set(requestKey, requestState);
     lastSubmittedKeywordRef.current = trimmedKeyword;
     setSearchState('loading');
 
     try {
       const result = await api.getNearbyPlaces(query);
-      if (!mountedRef.current || requestSequenceRef.current !== requestId) return;
+      if (!mountedRef.current || requestSequenceRef.current !== requestState.requestId) return;
       const nextPlaces = Array.isArray(result)
         ? result.filter((place) => place && place.id !== undefined && place.id !== null)
         : [];
@@ -139,10 +150,12 @@ export default function MapSelect() {
       setSelectedPlaceId(null);
       setSearchState(nextPlaces.length ? 'success' : 'empty');
     } catch {
-      if (!mountedRef.current || requestSequenceRef.current !== requestId) return;
+      if (!mountedRef.current || requestSequenceRef.current !== requestState.requestId) return;
       setSearchState('error');
     } finally {
-      inFlightSearchesRef.current.delete(requestKey);
+      if (inFlightSearchesRef.current.get(requestKey) === requestState) {
+        inFlightSearchesRef.current.delete(requestKey);
+      }
     }
   };
 
