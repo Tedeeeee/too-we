@@ -41,8 +41,25 @@ const GRANT_FIELDS = Object.freeze([
 /** finalize 전 dispatchId 자리에 들어가는 표식 — 검증에서는 통과시키지 않는다. */
 export const PREFLIGHT_DISPATCH = 'not-created-preflight';
 
-/** Orca terminal handle 형식. grant 파일명에 쓰이므로 경로 문자를 허용하지 않는다. */
+/**
+ * 외부에서 들어오는 식별자 형식.
+ *
+ * terminal handle은 grant 파일명이 되므로 경로 문자를 허용하지 않는다. task/dispatch id는
+ * 하위 프로세스 인자로 나가므로 셸 메타문자를 원천 차단한다.
+ */
 export const TERMINAL_HANDLE_PATTERN = /^term_[A-Za-z0-9._-]{1,80}$/;
+export const TASK_ID_PATTERN = /^task_[A-Za-z0-9_-]{1,64}$/;
+export const DISPATCH_ID_PATTERN = /^ctx_[A-Za-z0-9_-]{1,64}$/;
+export const TREE_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+export const COMMIT_PATTERN = /^[0-9a-fA-F]{7,64}$/;
+
+/** 증거 문구에 비밀정보가 섞이는 것을 막는 패턴. */
+const SECRET_PATTERNS = [
+  /sk-[A-Za-z0-9]/i,
+  /\bbearer\s+\S/i,
+  /(token|secret|api[_-]?key|service[_-]?role|password|passwd|credential)/i,
+  /[A-Za-z0-9+/]{40,}={0,2}/,
+];
 
 export const GRANT_VERSION = 1;
 export const MAX_SCOPE_LENGTH = 300;
@@ -215,7 +232,38 @@ export function normalizeDispatch(raw) {
   };
 }
 
-function isIsoInstant(value) {
+/**
+ * Orca CLI 실행 결과에서 dispatch를 읽는다. 실패, 비어 있음, 깨진 JSON은 모두 null이다.
+ *
+ * @param {{ status?: number, stdout?: string }} result
+ * @returns {ReturnType<typeof normalizeDispatch>}
+ */
+export function parseDispatchOutput(result) {
+  if (!result || typeof result !== 'object') return null;
+  if (typeof result.status === 'number' && result.status !== 0) return null;
+  const stdout = typeof result.stdout === 'string' ? result.stdout.trim() : '';
+  if (stdout === '') return null;
+  try {
+    return normalizeDispatch(JSON.parse(stdout));
+  } catch {
+    return null;
+  }
+}
+
+/** dispatch 상태가 살아 있다고 인정되는지. 목록에 없는 값은 모두 거짓이다. */
+export function isActiveDispatchStatus(status) {
+  return ACTIVE_DISPATCH_STATUSES.has(text(status).toLowerCase());
+}
+
+/** 증거 문구가 비밀정보처럼 보이는지 — grant 파일에 남기기 전에 막는다. */
+export function containsSecretMaterial(value) {
+  const candidate = typeof value === 'string' ? value : '';
+  if (/[\r\n]/.test(candidate)) return true;
+  return SECRET_PATTERNS.some((pattern) => pattern.test(candidate));
+}
+
+/** ISO-8601 순간 표기인지 — 날짜만 있는 값이나 자연어는 거부한다. */
+export function isIsoInstant(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})$/.test(value.trim())) return false;
   return Number.isFinite(Date.parse(value));
 }
