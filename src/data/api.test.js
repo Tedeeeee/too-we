@@ -4,6 +4,7 @@ import { ERROR_CODES } from './errors';
 import { __resetSupabaseClient, __setSupabaseClient } from './supabase';
 import {
   createFakeSupabaseClient,
+  lastRpcArgs,
   okEnvelope,
   queriesFor,
   rpcNames,
@@ -139,25 +140,43 @@ describe('data API facade', () => {
     expect(queriesFor(client, 'visits')).toHaveLength(1);
   });
 
-  it('새 기록 저장은 호출자 입력을 바꾸거나 파트너 한 줄을 만들어내지 않는다', async () => {
+  it('새 기록 저장은 입력을 바꾸지 않고 장소·시각만 있는 대기 기록을 만든다', async () => {
     const client = createFakeSupabaseClient({
       userId: ME,
       tables: {
         visits: [
           visitRow({
             id: 'v2',
-            visit_entries: [{ author_id: ME, note: '내 한 줄', rating: 3 }],
+            place_provider: 'kakao',
+            place_provider_id: 'kakao-api-1',
+            place_name: '연남동 카페',
+            place_category: '음식점 > 카페',
+            place_address: '서울 마포구 연남동',
+            place_road_address: '서울 마포구 동교로 1',
+            place_url: 'https://place.map.kakao.com/kakao-api-1',
+            place_lat: 37.566,
+            place_lng: 126.922,
           }),
         ],
       },
       rpc: {
         create_visit: okEnvelope({ visit_id: 'v2' }),
-        upsert_my_visit_entry: okEnvelope({ visit_id: 'v2' }),
       },
     });
     __setSupabaseClient(client);
     const input = {
-      place: { name: '직접 입력한 곳' },
+      place: {
+        id: 'kakao-api-1',
+        name: '연남동 카페',
+        category: '음식점 > 카페',
+        address: '서울 마포구 연남동',
+        roadAddress: '서울 마포구 동교로 1',
+        phone: '02-000-0000',
+        url: 'https://place.map.kakao.com/kakao-api-1',
+        lat: 37.566,
+        lng: 126.922,
+        provider: 'kakao',
+      },
       text: '  내 한 줄  ',
       rating: 3,
       date: '2026-05-03T10:14:00Z',
@@ -168,10 +187,24 @@ describe('data API facade', () => {
     const record = await api.saveFiveSecondRecord(input);
 
     expect(input).toEqual(original);
-    expect(rpcNames(client)).toEqual(['create_visit', 'upsert_my_visit_entry']);
-    expect(record.entries).toEqual([
-      expect.objectContaining({ memberId: 'me', text: '내 한 줄', rating: 3 }),
-    ]);
+    expect(rpcNames(client)).toEqual(['create_visit']);
+    expect(lastRpcArgs(client, 'create_visit')).toEqual({
+      p_place: {
+        provider: 'kakao',
+        provider_id: 'kakao-api-1',
+        name: '연남동 카페',
+        category: '음식점 > 카페',
+        address: '서울 마포구 연남동',
+        road_address: '서울 마포구 동교로 1',
+        phone: '02-000-0000',
+        url: 'https://place.map.kakao.com/kakao-api-1',
+        lat: 37.566,
+        lng: 126.922,
+      },
+      p_visited_at: '2026-05-03T10:14:00.000Z',
+      p_request_key: 'screen-request-key',
+    });
+    expect(record).toMatchObject({ pending: true, flower: null, entries: [], tags: [], photos: [] });
   });
 
   it('기본 Kakao 어댑터로 키워드를 검색하고 같은 장소 스냅샷을 다시 찾는다', async () => {

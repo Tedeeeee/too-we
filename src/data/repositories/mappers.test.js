@@ -198,6 +198,7 @@ describe('mapVisit — 화면 기록 셰이프', () => {
       placeName: '성수동 블루보틀',
       category: '카페',
       date: '2026-05-03T10:14:00Z',
+      pending: true,
       flower: 'rose',
       tags: [],
       photos: [],
@@ -373,6 +374,61 @@ describe('mapVisit — 화면 기록 셰이프', () => {
   it('내 별점이 없으면 0으로 떨어진다 (별점 없음)', () => {
     expect(mapVisit(visitRow({ visit_entries: [{ author_id: ME, note: 'x', rating: null }] }), ME).rating).toBe(0);
     expect(mapVisit(visitRow(), ME).rating).toBe(0);
+  });
+
+  it.each([
+    ['내 entry가 없음', [], true],
+    ['내 한 줄이 null이고 별점만 있음', [{ author_id: ME, note: null, rating: 5 }], true],
+    ['내 한 줄이 공백이고 별점만 있음', [{ author_id: ME, note: '   ', rating: 5 }], true],
+    ['상대 한 줄과 별점만 있음', [{ author_id: PARTNER, note: '상대 한 줄', rating: 5 }], true],
+    [
+      '내 한 줄은 비고 상대 한 줄은 있음',
+      [
+        { author_id: ME, note: null, rating: 5 },
+        { author_id: PARTNER, note: '상대 한 줄', rating: 5 },
+      ],
+      true,
+    ],
+    ['내 한 줄이 유효함', [{ author_id: ME, note: '  내 한 줄  ', rating: null }], false],
+    [
+      '내 한 줄이 유효하고 상대 한 줄은 비어 있음',
+      [
+        { author_id: ME, note: '내 한 줄', rating: 1 },
+        { author_id: PARTNER, note: null, rating: 5 },
+      ],
+      false,
+    ],
+  ])('pending은 현재 사용자 한 줄만 본다 — %s', (_caseName, visitEntries, pending) => {
+    const record = mapVisit(
+      visitRow({
+        flower_key: 'rose',
+        visit_entries: visitEntries,
+        visit_tags: [{ ordinal: 1, label: '# 태그' }],
+        visit_photos: [
+          { id: 'p1', ordinal: 1, storage_bucket: 'visit-photos', storage_path: 'c1/v1/a.webp' },
+        ],
+      }),
+      ME,
+    );
+
+    expect(record.pending).toBe(pending);
+  });
+
+  it('같은 공유 방문도 각 사용자의 한 줄 작성 여부에 따라 독립적으로 pending을 계산한다', () => {
+    const blank = visitRow();
+    const onlyMine = visitRow({
+      visit_entries: [{ author_id: ME, note: '내 한 줄', rating: 3 }],
+    });
+    const both = visitRow({
+      visit_entries: [
+        { author_id: ME, note: '내 한 줄', rating: 3 },
+        { author_id: PARTNER, note: '상대 한 줄', rating: 4 },
+      ],
+    });
+
+    expect([mapVisit(blank, ME).pending, mapVisit(blank, PARTNER).pending]).toEqual([true, true]);
+    expect([mapVisit(onlyMine, ME).pending, mapVisit(onlyMine, PARTNER).pending]).toEqual([false, true]);
+    expect([mapVisit(both, ME).pending, mapVisit(both, PARTNER).pending]).toEqual([false, false]);
   });
 });
 
