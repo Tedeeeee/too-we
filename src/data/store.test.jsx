@@ -181,6 +181,31 @@ describe('AppProvider actions', () => {
     await waitFor(() => expect(appState.ready).toBe(true));
   }
 
+  it('커플 생성 실패 시 같은 options 객체를 facade에 전달하고 기존 상태를 유지한다', async () => {
+    await renderReadyProvider();
+    const networkError = new AppError(ERROR_CODES.network);
+    const options = Object.freeze({ requestKey: 'create-couple-attempt-1' });
+    api.createCouple.mockRejectedValue(networkError);
+
+    await expect(appState.startNewCouple(options)).rejects.toBe(networkError);
+
+    expect(api.createCouple.mock.calls[0][0]).toBe(options);
+    expect(appState.couple).toEqual(RESTORED_COUPLE);
+  });
+
+  it('초대 연결 실패 시 코드와 같은 options 객체를 facade에 전달하고 기존 상태를 유지한다', async () => {
+    await renderReadyProvider();
+    const networkError = new AppError(ERROR_CODES.network);
+    const options = Object.freeze({ requestKey: 'join-couple-attempt-1' });
+    api.connectWithCode.mockRejectedValue(networkError);
+
+    await expect(appState.connectWithCode('731904', options)).rejects.toBe(networkError);
+
+    expect(api.connectWithCode.mock.calls[0]).toEqual(['731904', options]);
+    expect(api.connectWithCode.mock.calls[0][1]).toBe(options);
+    expect(appState.couple).toEqual(RESTORED_COUPLE);
+  });
+
   it('커플 action이 실패하면 마지막으로 성공한 커플 상태를 유지한다', async () => {
     await renderReadyProvider();
     const networkError = new AppError(ERROR_CODES.network);
