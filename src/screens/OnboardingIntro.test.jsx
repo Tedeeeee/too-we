@@ -48,6 +48,21 @@ function renderScreen(app = {}, path = '/onboarding') {
   );
 }
 
+function renderPersistentScreen(app = {}) {
+  useApp.mockReturnValue({
+    couple: NO_COUPLE,
+    startNewCouple: vi.fn(),
+    ...app,
+  });
+
+  return render(
+    <MemoryRouter initialEntries={['/onboarding']}>
+      <OnboardingIntro />
+      <Destination />
+    </MemoryRouter>,
+  );
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
 });
@@ -61,6 +76,10 @@ describe('OnboardingIntro creator flow', () => {
     await user.click(screen.getByRole('button', { name: '시작하기' }));
 
     expect(startNewCouple).toHaveBeenCalledTimes(1);
+    expect(startNewCouple).toHaveBeenCalledWith({
+      requestKey: expect.any(String),
+    });
+    expect(startNewCouple.mock.calls[0][0].requestKey).not.toBe('');
     expect(await screen.findByTestId('destination')).toHaveTextContent('/onboarding/name:false');
   });
 
@@ -94,6 +113,46 @@ describe('OnboardingIntro creator flow', () => {
     expect(alert).toHaveTextContent('네트워크 연결을 확인하고 다시 시도해 주세요.');
     expect(alert).not.toHaveTextContent(raw);
     expect(screen.getByRole('button', { name: '다시 시도' })).toBeEnabled();
+  });
+
+  it.each([ERROR_CODES.network, ERROR_CODES.rate_limited])(
+    '%s 실패를 재시도할 때 같은 create requestKey를 재사용한다',
+    async (code) => {
+      const user = userEvent.setup();
+      const startNewCouple = vi
+        .fn()
+        .mockRejectedValueOnce(new AppError(code))
+        .mockResolvedValueOnce(undefined);
+      renderScreen({ startNewCouple });
+
+      await user.click(screen.getByRole('button', { name: '시작하기' }));
+      await screen.findByRole('alert');
+
+      const firstRequestKey = startNewCouple.mock.calls[0][0].requestKey;
+      expect(firstRequestKey).toEqual(expect.any(String));
+      expect(firstRequestKey).not.toBe('');
+
+      await user.click(screen.getByRole('button', { name: '다시 시도' }));
+
+      expect(startNewCouple).toHaveBeenCalledTimes(2);
+      expect(startNewCouple.mock.calls[1][0]).toEqual({ requestKey: firstRequestKey });
+      expect(await screen.findByTestId('destination')).toHaveTextContent('/onboarding/name:false');
+    },
+  );
+
+  it('성공한 create intent를 지우고 다음 시작에는 새 requestKey를 만든다', async () => {
+    const user = userEvent.setup();
+    const startNewCouple = vi.fn().mockResolvedValue(undefined);
+    renderPersistentScreen({ startNewCouple });
+
+    await user.click(screen.getByRole('button', { name: '시작하기' }));
+    expect(screen.getByTestId('destination')).toHaveTextContent('/onboarding/name:false');
+    const firstRequestKey = startNewCouple.mock.calls[0][0].requestKey;
+
+    await user.click(screen.getByRole('button', { name: '시작하기' }));
+
+    expect(startNewCouple).toHaveBeenCalledTimes(2);
+    expect(startNewCouple.mock.calls[1][0].requestKey).not.toBe(firstRequestKey);
   });
 
   it.each([

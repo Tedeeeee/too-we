@@ -7,6 +7,11 @@ import PrimaryButton from '@/components/PrimaryButton';
 import { useApp } from '@/data/store';
 import { onboardingError } from './onboarding-errors';
 
+const newRequestKey = () => {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  return `onboarding-create-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
+
 /** onboarding1 — 서비스 소개 + 두 갈래 진입(시작하기 / 초대코드) */
 export default function OnboardingIntro() {
   const navigate = useNavigate();
@@ -14,6 +19,7 @@ export default function OnboardingIntro() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState(null);
   const inFlightRef = useRef(false);
+  const requestKeyRef = useRef(null);
 
   useEffect(() => {
     if (!couple?.coupleId) return;
@@ -39,12 +45,16 @@ export default function OnboardingIntro() {
     inFlightRef.current = true;
     setPending(true);
     setError(null);
+    requestKeyRef.current ??= newRequestKey();
 
     try {
-      await startNewCouple();
+      await startNewCouple({ requestKey: requestKeyRef.current });
+      requestKeyRef.current = null;
       navigate('/onboarding/name', { state: { invited: false } });
     } catch (nextError) {
-      setError(onboardingError(nextError, 'start'));
+      const nextOnboardingError = onboardingError(nextError, 'start');
+      if (!nextOnboardingError.retryable) requestKeyRef.current = null;
+      setError(nextOnboardingError);
     } finally {
       inFlightRef.current = false;
       setPending(false);

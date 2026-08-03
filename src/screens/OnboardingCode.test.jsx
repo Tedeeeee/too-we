@@ -52,6 +52,21 @@ function renderScreen(app = {}) {
   );
 }
 
+function renderPersistentScreen(app = {}) {
+  useApp.mockReturnValue({
+    couple: NO_COUPLE,
+    connectWithCode: vi.fn(),
+    ...app,
+  });
+
+  return render(
+    <MemoryRouter initialEntries={['/onboarding/code']}>
+      <OnboardingCode />
+      <Destination />
+    </MemoryRouter>,
+  );
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
 });
@@ -71,7 +86,10 @@ describe('OnboardingCode joiner flow', () => {
     await user.click(screen.getByRole('button', { name: '연결하기' }));
 
     expect(connectWithCode).toHaveBeenCalledTimes(1);
-    expect(connectWithCode).toHaveBeenCalledWith('482195');
+    expect(connectWithCode).toHaveBeenCalledWith('482195', {
+      requestKey: expect.any(String),
+    });
+    expect(connectWithCode.mock.calls[0][1].requestKey).not.toBe('');
     expect(await screen.findByTestId('destination')).toHaveTextContent('/onboarding/name:true');
   });
 
@@ -142,12 +160,56 @@ describe('OnboardingCode joiner flow', () => {
 
       expect(await screen.findByRole('alert')).toHaveTextContent('다시 시도');
       expect(input).toHaveValue('482195');
+      const firstRequestKey = connectWithCode.mock.calls[0][1].requestKey;
+      expect(firstRequestKey).toEqual(expect.any(String));
+      expect(firstRequestKey).not.toBe('');
       await user.click(screen.getByRole('button', { name: '다시 시도' }));
 
       expect(connectWithCode).toHaveBeenCalledTimes(2);
+      expect(connectWithCode.mock.calls[1][1]).toEqual({ requestKey: firstRequestKey });
       expect(await screen.findByTestId('destination')).toHaveTextContent('/onboarding/name:true');
     },
   );
+
+  it('실패 뒤 코드를 편집하면 새 join requestKey를 만든다', async () => {
+    const user = userEvent.setup();
+    const connectWithCode = vi
+      .fn()
+      .mockRejectedValueOnce(new AppError(ERROR_CODES.network))
+      .mockResolvedValueOnce(undefined);
+    renderScreen({ connectWithCode });
+
+    const input = screen.getByRole('textbox', { name: '초대 코드' });
+    await user.type(input, '482195');
+    await user.click(screen.getByRole('button', { name: '연결하기' }));
+    await screen.findByRole('alert');
+    const firstRequestKey = connectWithCode.mock.calls[0][1].requestKey;
+
+    await user.clear(input);
+    await user.type(input, '731904');
+    await user.click(screen.getByRole('button', { name: '연결하기' }));
+
+    expect(connectWithCode).toHaveBeenCalledTimes(2);
+    expect(connectWithCode.mock.calls[1][0]).toBe('731904');
+    expect(connectWithCode.mock.calls[1][1].requestKey).not.toBe(firstRequestKey);
+  });
+
+  it('성공한 join intent를 지우고 다음 연결에는 새 requestKey를 만든다', async () => {
+    const user = userEvent.setup();
+    const connectWithCode = vi.fn().mockResolvedValue(undefined);
+    renderPersistentScreen({ connectWithCode });
+
+    const input = screen.getByRole('textbox', { name: '초대 코드' });
+    await user.type(input, '482195');
+    await user.click(screen.getByRole('button', { name: '연결하기' }));
+    expect(screen.getByTestId('destination')).toHaveTextContent('/onboarding/name:true');
+    const firstRequestKey = connectWithCode.mock.calls[0][1].requestKey;
+
+    await user.click(screen.getByRole('button', { name: '연결하기' }));
+
+    expect(connectWithCode).toHaveBeenCalledTimes(2);
+    expect(connectWithCode.mock.calls[1][1].requestKey).not.toBe(firstRequestKey);
+  });
 
   it.each([
     [

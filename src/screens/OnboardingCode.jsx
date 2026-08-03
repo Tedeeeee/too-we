@@ -8,6 +8,11 @@ import HandDrawnLine from '@/components/HandDrawnLine';
 import { useApp } from '@/data/store';
 import { onboardingError } from './onboarding-errors';
 
+const newRequestKey = () => {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  return `onboarding-join-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
+
 /** onboarding2 — 초대 코드 입력 (6자리) */
 export default function OnboardingCode() {
   const navigate = useNavigate();
@@ -17,6 +22,7 @@ export default function OnboardingCode() {
   const [error, setError] = useState(null);
   const inputRef = useRef(null);
   const inFlightRef = useRef(false);
+  const requestKeyRef = useRef(null);
 
   const cur = Math.min(code.length, 5);
   const canSubmit = code.length === 6;
@@ -50,11 +56,15 @@ export default function OnboardingCode() {
     inFlightRef.current = true;
     setPending(true);
     setError(null);
+    requestKeyRef.current ??= newRequestKey();
     try {
-      await connectWithCode(code);
+      await connectWithCode(code, { requestKey: requestKeyRef.current });
+      requestKeyRef.current = null;
       navigate('/onboarding/name', { state: { invited: true } });
     } catch (nextError) {
-      setError(onboardingError(nextError, 'join'));
+      const nextOnboardingError = onboardingError(nextError, 'join');
+      if (!nextOnboardingError.retryable) requestKeyRef.current = null;
+      setError(nextOnboardingError);
     } finally {
       inFlightRef.current = false;
       setPending(false);
@@ -164,7 +174,9 @@ export default function OnboardingCode() {
         ref={inputRef}
         value={code}
         onChange={(e) => {
-          setCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+          const nextCode = e.target.value.replace(/\D/g, '').slice(0, 6);
+          if (nextCode !== code) requestKeyRef.current = null;
+          setCode(nextCode);
           setError(null);
         }}
         disabled={pending}
