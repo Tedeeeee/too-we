@@ -14,9 +14,14 @@ import { INTEGRATION_BRANCH, addWorktree, cleanup, git, makeWorkspace, orcaStub 
 const TERMINAL = 'term_dd2dc226-4f0c-4af3-ac3c-ce5d97d135ec';
 const TASK = 'task_288b4e349139';
 const DISPATCH = 'ctx_e78bbc014ce7';
+const RUN = 'run_85aff4ff9daf';
+const COORDINATOR = 'term_1a050ae1-f664-434f-a545-0ea73728d5ed';
 const NOW = new Date('2026-08-03T12:00:00.000Z');
 const OBSERVED = '2026-08-03T11:55:00.000Z';
 const EXPIRES = '2026-08-03T12:40:00.000Z';
+
+/** grant 발급은 Run의 코디네이터 터미널에서만 허용된다. */
+const COORDINATOR_ENV = { ORCA_TERMINAL_HANDLE: COORDINATOR };
 
 let workspace;
 let output;
@@ -34,7 +39,7 @@ function invoke(argv, options = {}) {
   return runGrant({
     argv,
     cwd: options.cwd ?? workspace.primary,
-    env: options.env ?? {},
+    env: options.env ?? COORDINATOR_ENV,
     now: options.now ?? NOW,
     orca: options.orca ?? orcaStub({ dispatchId: DISPATCH, taskId: TASK, terminalHandle: TERMINAL }),
     log: (line) => output.push(String(line)),
@@ -46,6 +51,7 @@ function createArgs(overrides = {}) {
   const args = {
     '--terminal': TERMINAL,
     '--task': TASK,
+    '--run': RUN,
     '--evidence-source': 'read-only-usage-check',
     '--observed-at': OBSERVED,
     '--expires-at': EXPIRES,
@@ -89,14 +95,23 @@ describe('grant create', () => {
       'dispatchId',
       'evidenceSource',
       'expiresAt',
+      'issuedByCoordinatorHandle',
       'observedAt',
       'reason',
       'remainingScope',
+      'runId',
       'status',
       'taskId',
       'terminalHandle',
       'version',
     ]);
+  });
+
+  it('records the Run and the issuing coordinator handle', () => {
+    expect(create()).toBe(0);
+    const grant = readGrantFile(grantFile());
+    expect(grant.runId).toBe(RUN);
+    expect(grant.issuedByCoordinatorHandle).toBe(COORDINATOR);
   });
 
   it('accepts repeated --allowed-path flags', () => {
@@ -122,7 +137,7 @@ describe('grant create', () => {
   });
 
   it('requires every evidence field', () => {
-    for (const flag of ['--evidence-source', '--observed-at', '--expires-at', '--allowed-path', '--remaining-scope', '--task', '--terminal']) {
+    for (const flag of ['--evidence-source', '--observed-at', '--expires-at', '--allowed-path', '--remaining-scope', '--task', '--terminal', '--run']) {
       output.length = 0;
       expect(create({ [flag]: null }), flag).toBe(1);
       expect(output.join('\n'), flag).toContain(flag);
@@ -204,6 +219,83 @@ describe('grant create', () => {
   });
 });
 
+describe('grant issuing authority', () => {
+  it('refuses when the session terminal is not the Run coordinator', () => {
+    // 구현 작업자가 C:\couple2로 cd해 자기 grant를 발급하는 경로를 막는다.
+    expect(create({}, { env: { ORCA_TERMINAL_HANDLE: TERMINAL } })).toBe(1);
+    expect(output.join('\n')).toMatch(/coordinator|코디네이터/i);
+    expect(fs.existsSync(grantFile())).toBe(false);
+  });
+
+  it('refuses when the session has no Orca terminal identity', () => {
+    expect(create({}, { env: {} })).toBe(1);
+    expect(fs.existsSync(grantFile())).toBe(false);
+  });
+
+  it('refuses to issue a grant to the coordinator terminal itself', () => {
+    expect(create({ '--terminal': COORDINATOR })).toBe(1);
+    expect(fs.existsSync(grantFilePath({ cwd: workspace.primary, terminalHandle: COORDINATOR }))).toBe(false);
+  });
+
+  it('fails closed when run-show is unavailable or unreadable', () => {
+    const broken = [
+      { status: 127, stdout: '', stderr: 'orca: not found' },
+      { status: 0, stdout: 'not json' },
+      { status: 0, stdout: '{}' },
+      { status: 0, stdout: JSON.stringify({ result: { run: { id: RUN } } }) },
+      { status: 1, stdout: JSON.stringify({ result: { run: { id: RUN, coordinator_handle: COORDINATOR } } }) },
+    ];
+    for (const result of broken) {
+      output.length = 0;
+      expect(create({}, { orca: { runShow: () => result, dispatchShow: () => result } }), JSON.stringify(result)).toBe(1);
+      expect(fs.existsSync(grantFile()), JSON.stringify(result)).toBe(false);
+    }
+    output.length = 0;
+    expect(create({}, { orca: { runShow: () => { throw new Error('spawn ENOENT'); }, dispatchShow: () => {} } })).toBe(1);
+    expect(fs.existsSync(grantFile())).toBe(false);
+  });
+
+  it('fails closed when run-show reports a different Run', () => {
+    const orca = orcaStub({ dispatchId: DISPATCH, taskId: TASK, terminalHandle: TERMINAL, runId: 'run_other', coordinatorHandle: COORDINATOR });
+    expect(create({}, { orca })).toBe(1);
+    expect(fs.existsSync(grantFile())).toBe(false);
+  });
+
+  it('rejects a malformed run id before shelling out to Orca', () => {
+    const orca = { runShow: () => { throw new Error('must not be called'); }, dispatchShow: () => {} };
+    expect(create({ '--run': 'run_$(whoami)' }, { orca })).toBe(1);
+    expect(create({ '--run': 'not-a-run' }, { orca })).toBe(1);
+  });
+
+  it('checks the Run coordinator on finalize too', () => {
+    expect(create()).toBe(0);
+    output.length = 0;
+    expect(invoke(['finalize', '--terminal', TERMINAL, '--dispatch', DISPATCH], {
+      env: { ORCA_TERMINAL_HANDLE: TERMINAL },
+    })).toBe(1);
+    expect(readGrantFile(grantFile()).status).toBe('provisional');
+  });
+
+  it('refuses to finalize outside the primary integration worktree', () => {
+    expect(create()).toBe(0);
+    const linked = addWorktree(workspace, 'child', 'claude/feature');
+    output.length = 0;
+    expect(invoke(['finalize', '--terminal', TERMINAL, '--dispatch', DISPATCH], { cwd: linked })).toBe(1);
+    expect(readGrantFile(grantFile()).status).toBe('provisional');
+  });
+
+  it('lets the worker hook reserve and consume without coordinator identity', () => {
+    expect(create()).toBe(0);
+    expect(invoke(['finalize', '--terminal', TERMINAL, '--dispatch', DISPATCH])).toBe(0);
+
+    const linked = addWorktree(workspace, 'child', 'claude/feature');
+    const workerOptions = { cwd: linked, env: { CODEX_THREAD_ID: 't', ORCA_TERMINAL_HANDLE: TERMINAL } };
+    expect(invoke(['reserve', '--terminal', TERMINAL, '--tree', 'tree-a'], workerOptions)).toBe(0);
+    expect(invoke(['consume', '--terminal', TERMINAL, '--tree', 'tree-a', '--commit', 'abc1234'], workerOptions)).toBe(0);
+    expect(readGrantFile(grantFile()).status).toBe('consumed');
+  });
+});
+
 describe('grant finalize', () => {
   beforeEach(() => {
     expect(create()).toBe(0);
@@ -213,7 +305,8 @@ describe('grant finalize', () => {
   it('binds the live dispatch exactly once', () => {
     const orca = orcaStub({ dispatchId: DISPATCH, taskId: TASK, terminalHandle: TERMINAL });
     expect(invoke(['finalize', '--terminal', TERMINAL, '--dispatch', DISPATCH], { orca })).toBe(0);
-    expect(orca.calls).toEqual([TASK]);
+    // coordinator 권한을 먼저 확인하고 그다음 Dispatch를 대조한다.
+    expect(orca.calls).toEqual([`run-show:${RUN}`, `dispatch-show:${TASK}`]);
 
     const grant = readGrantFile(grantFile());
     expect(grant.status).toBe('active');
@@ -228,6 +321,12 @@ describe('grant finalize', () => {
 
   it('rejects a dispatch whose assignee is a different terminal', () => {
     const orca = orcaStub({ dispatchId: DISPATCH, taskId: TASK, terminalHandle: 'term_someone_else' });
+    expect(invoke(['finalize', '--terminal', TERMINAL, '--dispatch', DISPATCH], { orca })).toBe(1);
+    expect(readGrantFile(grantFile()).status).toBe('provisional');
+  });
+
+  it('rejects a dispatch that belongs to a different Run', () => {
+    const orca = orcaStub({ dispatchId: DISPATCH, taskId: TASK, terminalHandle: TERMINAL, runId: 'run_other', coordinatorHandle: COORDINATOR });
     expect(invoke(['finalize', '--terminal', TERMINAL, '--dispatch', DISPATCH], { orca })).toBe(1);
     expect(readGrantFile(grantFile()).status).toBe('provisional');
   });

@@ -26,6 +26,8 @@ const GRANT_FIELDS = Object.freeze([
   'terminalHandle',
   'taskId',
   'dispatchId',
+  'runId',
+  'issuedByCoordinatorHandle',
   'evidenceSource',
   'observedAt',
   'expiresAt',
@@ -50,6 +52,7 @@ export const PREFLIGHT_DISPATCH = 'not-created-preflight';
 export const TERMINAL_HANDLE_PATTERN = /^term_[A-Za-z0-9._-]{1,80}$/;
 export const TASK_ID_PATTERN = /^task_[A-Za-z0-9_-]{1,64}$/;
 export const DISPATCH_ID_PATTERN = /^ctx_[A-Za-z0-9_-]{1,64}$/;
+export const RUN_ID_PATTERN = /^run_[A-Za-z0-9_-]{1,64}$/;
 export const TREE_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 export const COMMIT_PATTERN = /^[0-9a-fA-F]{7,64}$/;
 
@@ -76,8 +79,16 @@ const ACTIVE_DISPATCH_STATUSES = new Set([
   'working',
 ]);
 
-const CODEX_MARKERS = ['CODEX_THREAD_ID', 'CODEX_HOME', 'CODEX_SESSION_ID', 'CODEX_CLI_VERSION'];
-const CLAUDE_MARKERS = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID'];
+/**
+ * 세션 주체 표식은 세 층으로 나뉜다. 값은 보지 않고 존재 여부만 본다.
+ *
+ * Orca는 `CODEX_HOME`과 `ORCA_CODEX_HOME`을 **모든** 터미널에 물려준다. Codex 런타임 홈
+ * 경로일 뿐 세션 주체가 아니므로, 이것만으로 Codex라고 단정하면 Claude 세션까지 전부
+ * Codex로 분류돼 테스트·빌드·커밋이 막힌다. 그래서 ambient 층을 따로 둔다.
+ */
+const CODEX_SESSION_MARKERS = ['CODEX_THREAD_ID', 'CODEX_SESSION_ID'];
+const CLAUDE_NATIVE_MARKERS = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID'];
+const CODEX_AMBIENT_MARKERS = ['CODEX_HOME', 'ORCA_CODEX_HOME', 'CODEX_CLI_VERSION'];
 
 /**
  * 조정자(Codex)가 grant 없이 손댈 수 있는 저장소 루트 파일.
@@ -97,19 +108,27 @@ function hasMarker(env, names) {
 }
 
 /**
- * 세션 주체를 판정한다.
+ * 세션 주체를 판정한다. 우선순위가 이 함수의 핵심이다.
  *
- * Codex와 Claude 표식이 함께 있으면 Codex로 본다 — 정체가 모순될 때 더 엄격한 쪽으로
- * 닫아야 하기 때문이다(설계서 "Missing or contradictory identity fails closed").
+ * 1. Codex 세션 고유 표식이 있으면 Codex다. Claude 표식이나 `ORCA_AGENT`를 덧붙여도
+ *    바뀌지 않는다 — 표식을 덧칠해 가드를 여는 경로를 닫는다(fail closed).
+ * 2. provider-native Claude 표식이 있으면 Claude다. 상속된 ambient Codex 표식보다 우선한다.
+ * 3. 그다음 `ORCA_AGENT` 선언을 본다.
+ * 4. 마지막으로 ambient Codex 표식만 있으면 Codex로 본다.
  *
  * @param {Record<string, string|undefined>} [env]
  * @returns {'codex'|'claude'|'human'}
  */
 export function classifyAgent(env) {
   const source = env && typeof env === 'object' ? env : {};
+  if (hasMarker(source, CODEX_SESSION_MARKERS)) return 'codex';
+  if (hasMarker(source, CLAUDE_NATIVE_MARKERS)) return 'claude';
+
   const declared = text(source.ORCA_AGENT).toLowerCase();
-  if (declared === 'codex' || hasMarker(source, CODEX_MARKERS)) return 'codex';
-  if (declared === 'claude' || hasMarker(source, CLAUDE_MARKERS)) return 'claude';
+  if (declared === 'codex') return 'codex';
+  if (declared === 'claude') return 'claude';
+
+  if (hasMarker(source, CODEX_AMBIENT_MARKERS)) return 'codex';
   return 'human';
 }
 
@@ -227,27 +246,79 @@ export function normalizeDispatch(raw) {
   return {
     dispatchId,
     taskId: firstString(node, ['taskId', 'task_id', 'task']),
+    runId: firstString(node, ['runId', 'run_id', 'run']),
     status: firstString(node, ['status', 'state']),
     terminalHandle,
   };
 }
 
 /**
- * Orca CLI 실행 결과에서 dispatch를 읽는다. 실패, 비어 있음, 깨진 JSON은 모두 null이다.
+ * `orca orchestration run-show --json` 출력에서 Run과 코디네이터 handle을 뽑는다.
  *
- * @param {{ status?: number, stdout?: string }} result
- * @returns {ReturnType<typeof normalizeDispatch>}
+ * 코디네이터 handle을 못 읽으면 null이다 — 발급 권한을 확인할 수 없으면 grant를 만들지
+ * 않아야 하기 때문이다.
+ *
+ * @param {unknown} raw
+ * @returns {{ runId: string, status: string, coordinatorHandle: string }|null}
  */
-export function parseDispatchOutput(result) {
+export function normalizeRun(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  let node = raw;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) break;
+    const key = ['result', 'data', 'run'].find((candidate) => node[candidate] && typeof node[candidate] === 'object');
+    if (!key) break;
+    node = node[key];
+  }
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return null;
+
+  const coordinatorHandle = firstString(node, [
+    'coordinatorHandle',
+    'coordinator_handle',
+    'coordinatorTerminal',
+    'coordinator_terminal',
+    'coordinator',
+  ]);
+  if (coordinatorHandle === '') return null;
+
+  return {
+    runId: firstString(node, ['runId', 'run_id', 'id']),
+    status: firstString(node, ['status', 'state']),
+    coordinatorHandle,
+  };
+}
+
+/** Orca CLI 실행 결과에서 JSON을 읽는다. 실패, 비어 있음, 깨진 JSON은 모두 null이다. */
+function parseCliJson(result) {
   if (!result || typeof result !== 'object') return null;
   if (typeof result.status === 'number' && result.status !== 0) return null;
   const stdout = typeof result.stdout === 'string' ? result.stdout.trim() : '';
   if (stdout === '') return null;
   try {
-    return normalizeDispatch(JSON.parse(stdout));
+    return JSON.parse(stdout);
   } catch {
     return null;
   }
+}
+
+/**
+ * `dispatch-show` 실행 결과를 정규화한다.
+ *
+ * @param {{ status?: number, stdout?: string }} result
+ * @returns {ReturnType<typeof normalizeDispatch>}
+ */
+export function parseDispatchOutput(result) {
+  return normalizeDispatch(parseCliJson(result));
+}
+
+/**
+ * `run-show` 실행 결과를 정규화한다.
+ *
+ * @param {{ status?: number, stdout?: string }} result
+ * @returns {ReturnType<typeof normalizeRun>}
+ */
+export function parseRunOutput(result) {
+  return normalizeRun(parseCliJson(result));
 }
 
 /** dispatch 상태가 살아 있다고 인정되는지. 목록에 없는 값은 모두 거짓이다. */
@@ -330,6 +401,16 @@ export function validateGrant({ grant, env, changedPaths, dispatch, now, tree } 
   }
 
   if (text(grant.taskId) === '') add('task_id_missing', 'taskId');
+  if (!RUN_ID_PATTERN.test(text(grant.runId))) add('run_id_missing', 'runId');
+
+  // 발급 권한: grant는 Run의 코디네이터가 만들어야 하고, 작업자가 자신에게 발급할 수 없다.
+  const issuer = text(grant.issuedByCoordinatorHandle);
+  if (issuer === '' || !TERMINAL_HANDLE_PATTERN.test(issuer)) {
+    add('coordinator_handle_missing', 'issuedByCoordinatorHandle');
+  } else if (grantTerminal !== '' && issuer === grantTerminal) {
+    add('grant_self_issued', 'issuedByCoordinatorHandle');
+  }
+
   if (!EVIDENCE_SOURCES.includes(grant.evidenceSource)) add('evidence_source_invalid', 'evidenceSource');
 
   if (!isIsoInstant(grant.observedAt) || Date.parse(grant.observedAt) > at) {
@@ -356,6 +437,9 @@ export function validateGrant({ grant, env, changedPaths, dispatch, now, tree } 
     }
     if (text(grant.taskId) !== '' && normalizedDispatch.taskId !== text(grant.taskId)) {
       add('dispatch_task_mismatch', 'taskId');
+    }
+    if (normalizedDispatch.runId === '' || normalizedDispatch.runId !== text(grant.runId)) {
+      add('dispatch_run_mismatch', 'runId');
     }
     if (grantTerminal !== '' && normalizedDispatch.terminalHandle !== grantTerminal) {
       add('dispatch_assignee_mismatch', 'terminalHandle');

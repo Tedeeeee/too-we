@@ -32,6 +32,7 @@ import {
   MAX_GRANT_MINUTES,
   MAX_SCOPE_LENGTH,
   PREFLIGHT_DISPATCH,
+  RUN_ID_PATTERN,
   TASK_ID_PATTERN,
   TERMINAL_HANDLE_PATTERN,
   TREE_PATTERN,
@@ -40,6 +41,7 @@ import {
   isIsoInstant,
   normalizeAllowedPaths,
   parseDispatchOutput,
+  parseRunOutput,
 } from './agent-routing-policy.mjs';
 
 const GRANTS_DIRNAME = 'orca-routing-grants';
@@ -48,7 +50,7 @@ const MINUTE = 60_000;
 
 /** 명령별 허용 플래그. 목록에 없는 플래그는 거부한다 — 자유 payload 유입을 막는다. */
 const COMMANDS = {
-  create: ['--terminal', '--task', '--evidence-source', '--observed-at', '--expires-at', '--allowed-path', '--remaining-scope'],
+  create: ['--terminal', '--task', '--run', '--evidence-source', '--observed-at', '--expires-at', '--allowed-path', '--remaining-scope'],
   finalize: ['--terminal', '--dispatch'],
   status: ['--terminal'],
   reserve: ['--terminal', '--tree'],
@@ -148,22 +150,87 @@ function parseArgv(argv) {
 
 /** 실제 Orca CLI 어댑터. 테스트는 같은 모양의 스텁을 주입한다. */
 export function createOrcaAdapter() {
+  /** 식별자는 호출 전에 패턴 검사를 통과하므로 셸 메타문자가 들어올 수 없다. */
+  const run = (args) => {
+    const result = spawnSync('orca', args, {
+      encoding: 'utf8',
+      shell: process.platform === 'win32',
+      windowsHide: true,
+    });
+    if (result.error) throw result.error;
+    return { status: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+  };
   return {
-    /** taskId는 호출 전에 TASK_ID_PATTERN으로 검사되므로 셸 메타문자가 들어올 수 없다. */
     dispatchShow(taskId) {
-      const result = spawnSync('orca', ['orchestration', 'dispatch-show', '--task', taskId, '--json'], {
-        encoding: 'utf8',
-        shell: process.platform === 'win32',
-        windowsHide: true,
-      });
-      if (result.error) throw result.error;
-      return { status: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+      return run(['orchestration', 'dispatch-show', '--task', taskId, '--json']);
+    },
+    runShow(runId) {
+      return run(['orchestration', 'run-show', '--id', runId, '--json']);
     },
   };
 }
 
+/**
+ * 이 세션이 해당 Run의 코디네이터인지 확인한다.
+ *
+ * 주 통합 worktree에서 실행한다는 조건만으로는 부족하다 — 구현 작업자가 통합 worktree로
+ * 이동해 자기 grant를 발급할 수 있기 때문이다. Run의 `coordinator_handle`과 현재 세션의
+ * `ORCA_TERMINAL_HANDLE`이 정확히 같을 때만 발급을 허용한다.
+ *
+ * @returns {string|null} 확인된 코디네이터 handle, 실패 시 null
+ */
+function verifyCoordinatorAuthority({ orca, runId, env, fail }) {
+  const sessionTerminal = String(env?.ORCA_TERMINAL_HANDLE ?? '').trim();
+  if (!TERMINAL_HANDLE_PATTERN.test(sessionTerminal)) {
+    fail('ORCA_TERMINAL_HANDLE이 없어 coordinator 권한을 확인할 수 없다');
+    return null;
+  }
+  let raw;
+  try {
+    raw = orca.runShow(runId);
+  } catch {
+    fail('Orca run-show를 실행할 수 없어 coordinator 권한을 확인할 수 없다');
+    return null;
+  }
+  const run = parseRunOutput(raw);
+  if (!run) {
+    fail('Orca run-show 출력에서 coordinator_handle을 읽을 수 없다');
+    return null;
+  }
+  if (run.runId !== '' && run.runId !== runId) {
+    fail('run-show가 요청한 Run과 다른 Run을 반환했다');
+    return null;
+  }
+  if (run.coordinatorHandle !== sessionTerminal) {
+    fail('이 터미널은 해당 Run의 coordinator가 아니다 — grant는 coordinator만 발급한다');
+    return null;
+  }
+  return run.coordinatorHandle;
+}
+
+/** create/finalize는 주 통합 worktree의 통합 브랜치에서만 실행된다. */
+function assertIntegrationWorktree({ cwd, fail }) {
+  let primary;
+  try {
+    primary = resolvePrimaryWorktree(cwd);
+  } catch (cause) {
+    fail(String(cause.message ?? cause));
+    return false;
+  }
+  if (fs.realpathSync(path.resolve(cwd)) !== primary) {
+    fail(`grant는 primary worktree(${primary})에서만 다룰 수 있다`);
+    return false;
+  }
+  const branch = gitOut(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (branch !== INTEGRATION_BRANCH) {
+    fail(`grant는 ${INTEGRATION_BRANCH} 브랜치에서만 다룰 수 있다 (현재 ${branch})`);
+    return false;
+  }
+  return true;
+}
+
 /** 살아 있는 dispatch를 읽어 grant와 대조한다. 못 읽으면 닫는다. */
-function verifyDispatch({ orca, taskId, dispatchId, terminalHandle, fail }) {
+function verifyDispatch({ orca, taskId, dispatchId, runId, terminalHandle, fail }) {
   let raw;
   try {
     raw = orca.dispatchShow(taskId);
@@ -182,6 +249,10 @@ function verifyDispatch({ orca, taskId, dispatchId, terminalHandle, fail }) {
   }
   if (dispatch.taskId !== taskId) {
     fail('살아 있는 Dispatch의 Task가 grant의 Task와 다르다');
+    return null;
+  }
+  if (dispatch.runId === '' || dispatch.runId !== runId) {
+    fail('살아 있는 Dispatch의 Run이 grant의 Run과 다르다');
     return null;
   }
   if (dispatch.terminalHandle !== terminalHandle) {
@@ -205,6 +276,7 @@ export function runGrant(options = {}) {
   const {
     argv = [],
     cwd = process.cwd(),
+    env = process.env,
     now = new Date(),
     orca = createOrcaAdapter(),
     log = console.log,
@@ -242,23 +314,13 @@ export function runGrant(options = {}) {
   const existing = readGrantFile(file);
 
   if (command === 'create') {
-    let primary;
-    try {
-      primary = resolvePrimaryWorktree(cwd);
-    } catch (cause) {
-      error(String(cause.message ?? cause));
-      return 1;
-    }
-    if (fs.realpathSync(path.resolve(cwd)) !== primary) {
-      fail(`grant는 primary worktree(${primary})에서만 만들 수 있다`);
-    }
-    const branch = gitOut(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    if (branch !== INTEGRATION_BRANCH) {
-      fail(`grant는 ${INTEGRATION_BRANCH} 브랜치에서만 만들 수 있다 (현재 ${branch})`);
-    }
+    assertIntegrationWorktree({ cwd, fail });
 
     const taskId = values.get('--task');
     if (!TASK_ID_PATTERN.test(taskId)) fail('--task 값이 Orca task id 형식이 아니다');
+
+    const runId = values.get('--run');
+    if (!RUN_ID_PATTERN.test(runId)) fail('--run 값이 Orca run id 형식이 아니다');
 
     const evidenceSource = values.get('--evidence-source');
     if (!EVIDENCE_SOURCES.includes(evidenceSource)) {
@@ -301,6 +363,13 @@ export function runGrant(options = {}) {
 
     if (problems.length > 0) return finish();
 
+    const coordinatorHandle = verifyCoordinatorAuthority({ orca, runId, env, fail });
+    if (!coordinatorHandle) return finish();
+    if (coordinatorHandle === terminalHandle) {
+      fail('coordinator 터미널에 grant를 발급할 수 없다 — 구현 작업자 터미널을 분리한다');
+      return finish();
+    }
+
     writeGrantFile(file, {
       version: GRANT_VERSION,
       reason: GRANT_REASON,
@@ -308,6 +377,8 @@ export function runGrant(options = {}) {
       terminalHandle,
       taskId,
       dispatchId: PREFLIGHT_DISPATCH,
+      runId,
+      issuedByCoordinatorHandle: coordinatorHandle,
       evidenceSource,
       observedAt,
       expiresAt,
@@ -344,14 +415,25 @@ export function runGrant(options = {}) {
   }
 
   if (command === 'finalize') {
+    assertIntegrationWorktree({ cwd, fail });
     const dispatchId = values.get('--dispatch');
     if (!DISPATCH_ID_PATTERN.test(dispatchId)) fail('--dispatch 값이 Orca dispatch id 형식이 아니다');
     if (existing.status !== 'provisional') fail(`grant가 이미 ${existing.status} 상태다 — finalize는 한 번만 한다`);
     if (!TASK_ID_PATTERN.test(String(existing.taskId ?? ''))) fail('grant의 taskId가 손상됐다');
+    if (!RUN_ID_PATTERN.test(String(existing.runId ?? ''))) fail('grant의 runId가 손상됐다');
     if (!isIsoInstant(existing.expiresAt) || Date.parse(existing.expiresAt) <= at) fail('grant가 만료됐다');
     if (problems.length > 0) return finish();
 
-    if (!verifyDispatch({ orca, taskId: existing.taskId, dispatchId, terminalHandle, fail })) return finish();
+    const coordinatorHandle = verifyCoordinatorAuthority({ orca, runId: existing.runId, env, fail });
+    if (!coordinatorHandle) return finish();
+    if (coordinatorHandle !== String(existing.issuedByCoordinatorHandle ?? '')) {
+      fail('grant를 발급한 coordinator와 finalize하는 coordinator가 다르다');
+      return finish();
+    }
+
+    if (!verifyDispatch({ orca, taskId: existing.taskId, dispatchId, runId: existing.runId, terminalHandle, fail })) {
+      return finish();
+    }
 
     writeGrantFile(file, { ...existing, status: 'active', dispatchId, finalizedAt: nowIso });
     log(`grant finalize됨: ${terminalHandle} / ${dispatchId}`);

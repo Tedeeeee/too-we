@@ -21,11 +21,16 @@ import {
   tryGit,
   writeFile,
 } from './agent-routing-test-support.mjs';
-import { runInstall } from './install-agent-routing-hooks.mjs';
+import { deployedHooksDir, runInstall } from './agent-routing-install-hooks.mjs';
 
 const TERMINAL = 'term_dd2dc226-4f0c-4af3-ac3c-ce5d97d135ec';
 const TASK = 'task_288b4e349139';
 const DISPATCH = 'ctx_e78bbc014ce7';
+const RUN = 'run_85aff4ff9daf';
+const COORDINATOR = 'term_1a050ae1-f664-434f-a545-0ea73728d5ed';
+
+/** 실제 Claude 작업자 터미널은 ambient CODEX_HOME을 물려받은 상태다 — 일부러 지우지 않는다. */
+const CLAUDE_ENV = { CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', ORCA_TERMINAL_HANDLE: 'term_claude' };
 
 const CODEX_ENV = { CODEX_THREAD_ID: 'thread-1', ORCA_TERMINAL_HANDLE: TERMINAL };
 
@@ -58,8 +63,15 @@ function configuredHooksPath(cwd) {
   return git(cwd, ['config', '--path', '--get', 'core.hooksPath']);
 }
 
+/**
+ * 배포 경로는 작업 트리 밖의 Git common 디렉터리다.
+ *
+ * `core.hooksPath`를 버전 관리되는 `<primary>/.githooks`에 두면 Codex가
+ * `git rm .githooks/pre-commit` 한 커밋으로 훅 실행 자체를 없앨 수 있다. 배포된 사본은
+ * 커밋으로 지울 수 없다.
+ */
 function expectedHooksPath() {
-  return posix(path.join(workspace.primary, '.githooks'));
+  return posix(path.join(workspace.primary, '.git', 'orca-routing-hooks'));
 }
 
 describe('hook installation', () => {
@@ -67,14 +79,30 @@ describe('hook installation', () => {
     installGuardFiles(workspace.primary);
   });
 
-  it('points the shared repository at the primary .githooks directory', () => {
+  it('deploys the hooks outside the working tree and points Git at that copy', () => {
     expect(install()).toBe(0);
     expect(configuredHooksPath(workspace.primary)).toBe(expectedHooksPath());
+    expect(posix(deployedHooksDir(workspace.primary))).toBe(expectedHooksPath());
+
+    for (const hook of ['pre-commit', 'post-commit']) {
+      const deployed = path.join(workspace.primary, '.git', 'orca-routing-hooks', hook);
+      expect(fs.existsSync(deployed), hook).toBe(true);
+      expect(fs.readFileSync(deployed, 'utf8'))
+        .toBe(fs.readFileSync(path.join(workspace.primary, '.githooks', hook), 'utf8'));
+    }
+  });
+
+  it('refreshes the deployed copy when the versioned template changes', () => {
+    expect(install()).toBe(0);
+    writeFile(workspace.primary, '.githooks/pre-commit', '#!/bin/sh\nexit 0\n');
+    output.length = 0;
+    expect(install()).toBe(0);
+    expect(fs.readFileSync(path.join(workspace.primary, '.git', 'orca-routing-hooks', 'pre-commit'), 'utf8'))
+      .toBe('#!/bin/sh\nexit 0\n');
   });
 
   it('resolves the primary worktree even when invoked from a child worktree', () => {
     const linked = addWorktree(workspace, 'child', 'claude/feature');
-    fs.mkdirSync(path.join(linked, '.githooks'), { recursive: true });
 
     expect(install({ cwd: linked })).toBe(0);
     expect(configuredHooksPath(linked)).toBe(expectedHooksPath());
@@ -205,12 +233,7 @@ describe('pre-commit hook', () => {
     writeFile(workspace.primary, 'src/data/api.js', 'claude edit\n');
     git(workspace.primary, ['add', '--', 'src/data/api.js']);
 
-    const result = tryGit(workspace.primary, ['commit', '-m', 'feat: claude edit'], {
-      CLAUDECODE: '1',
-      CODEX_THREAD_ID: '',
-      CODEX_HOME: '',
-      ORCA_TERMINAL_HANDLE: 'term_claude',
-    });
+    const result = tryGit(workspace.primary, ['commit', '-m', 'feat: claude edit'], CLAUDE_ENV);
     expect(result.status).toBe(0);
   });
 
@@ -225,6 +248,42 @@ describe('pre-commit hook', () => {
   });
 });
 
+describe('tamper resistance', () => {
+  beforeEach(() => {
+    installGuardFiles(workspace.primary);
+    expect(install()).toBe(0);
+  });
+
+  it('still runs when Codex stages the deletion of the versioned hook', () => {
+    // 배포된 사본이 Git common 디렉터리에 있으므로 커밋으로 지울 수 없다.
+    const before = git(workspace.primary, ['rev-parse', 'HEAD']);
+    git(workspace.primary, ['rm', '-q', '--', '.githooks/pre-commit']);
+
+    const result = tryGit(workspace.primary, ['commit', '-m', 'chore: drop hook'], CODEX_ENV);
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('.githooks/pre-commit');
+    expect(git(workspace.primary, ['rev-parse', 'HEAD'])).toBe(before);
+  });
+
+  it('blocks every session when the verifier is staged for deletion', () => {
+    const before = git(workspace.primary, ['rev-parse', 'HEAD']);
+    git(workspace.primary, ['rm', '-q', '--', 'scripts/verify-agent-routing.mjs']);
+
+    for (const env of [CODEX_ENV, CLAUDE_ENV, {}]) {
+      const result = tryGit(workspace.primary, ['commit', '-m', 'chore: drop verifier'], env);
+      expect(result.status, JSON.stringify(env)).not.toBe(0);
+      expect(`${result.stdout}${result.stderr}`, JSON.stringify(env)).toMatch(/agent-routing/);
+      expect(git(workspace.primary, ['rev-parse', 'HEAD'])).toBe(before);
+    }
+  });
+
+  it('blocks every session when the verifier is moved away', () => {
+    git(workspace.primary, ['mv', 'scripts/verify-agent-routing.mjs', 'scripts/parked.mjs']);
+    const result = tryGit(workspace.primary, ['commit', '-m', 'chore: move verifier'], {});
+    expect(result.status).not.toBe(0);
+  });
+});
+
 describe('post-commit hook', () => {
   beforeEach(() => {
     installGuardFiles(workspace.primary);
@@ -235,6 +294,7 @@ describe('post-commit hook', () => {
   function reservedGrant() {
     const options = {
       cwd: workspace.primary,
+      env: { ORCA_TERMINAL_HANDLE: COORDINATOR },
       now: new Date(),
       orca: orcaStub({ dispatchId: DISPATCH, taskId: TASK, terminalHandle: TERMINAL }),
       log: () => {},
@@ -248,6 +308,7 @@ describe('post-commit hook', () => {
         'create',
         '--terminal', TERMINAL,
         '--task', TASK,
+        '--run', RUN,
         '--evidence-source', 'read-only-usage-check',
         '--observed-at', observedAt,
         '--expires-at', expiresAt,
@@ -301,12 +362,7 @@ describe('post-commit hook', () => {
     git(workspace.primary, ['add', '--', 'src/data/api.js']);
     reservedGrant();
 
-    const result = tryGit(workspace.primary, ['commit', '-m', 'feat: claude edit', '--no-verify'], {
-      CLAUDECODE: '1',
-      CODEX_THREAD_ID: '',
-      CODEX_HOME: '',
-      ORCA_TERMINAL_HANDLE: 'term_claude',
-    });
+    const result = tryGit(workspace.primary, ['commit', '-m', 'feat: claude edit', '--no-verify'], CLAUDE_ENV);
     expect(result.status).toBe(0);
     const grant = readGrantFile(grantFilePath({ cwd: workspace.primary, terminalHandle: TERMINAL }));
     expect(grant.status).toBe('active');

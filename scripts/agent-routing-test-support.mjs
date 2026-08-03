@@ -19,7 +19,7 @@ const GUARD_FILES = [
   'scripts/agent-routing-policy.mjs',
   'scripts/agent-routing-grant.mjs',
   'scripts/verify-agent-routing.mjs',
-  'scripts/install-agent-routing-hooks.mjs',
+  'scripts/agent-routing-install-hooks.mjs',
   '.githooks/pre-commit',
   '.githooks/post-commit',
   '.gitattributes',
@@ -103,17 +103,41 @@ export function cleanup(root) {
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 });
 }
 
-/** 성공하는 Orca dispatch-show 스텁 — 실제 CLI의 출력 형태를 그대로 흉내낸다. */
-export function orcaStub({ dispatchId, taskId, terminalHandle, status = 'dispatched' }) {
+/** 성공하는 Orca 스텁 — 실제 CLI의 출력 형태를 그대로 흉내낸다. */
+export function orcaStub({
+  dispatchId,
+  taskId,
+  terminalHandle,
+  status = 'dispatched',
+  runId = 'run_85aff4ff9daf',
+  coordinatorHandle = 'term_1a050ae1-f664-434f-a545-0ea73728d5ed',
+}) {
   const calls = [];
   return {
     calls,
     dispatchShow(requestedTask) {
-      calls.push(requestedTask);
+      calls.push(`dispatch-show:${requestedTask}`);
       return {
         status: 0,
         stdout: JSON.stringify({
-          result: { dispatch: { id: dispatchId, task_id: taskId, status, assignee_handle: terminalHandle } },
+          result: {
+            dispatch: {
+              id: dispatchId,
+              task_id: taskId,
+              run_id: runId,
+              status,
+              assignee_handle: terminalHandle,
+            },
+          },
+        }),
+      };
+    },
+    runShow(requestedRun) {
+      calls.push(`run-show:${requestedRun}`);
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          result: { run: { id: runId, status: 'active', coordinator_handle: coordinatorHandle } },
         }),
       };
     },

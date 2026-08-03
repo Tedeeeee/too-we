@@ -14,6 +14,8 @@ import { runVerify } from './verify-agent-routing.mjs';
 const TERMINAL = 'term_dd2dc226-4f0c-4af3-ac3c-ce5d97d135ec';
 const TASK = 'task_288b4e349139';
 const DISPATCH = 'ctx_e78bbc014ce7';
+const RUN = 'run_85aff4ff9daf';
+const COORDINATOR = 'term_1a050ae1-f664-434f-a545-0ea73728d5ed';
 const NOW = new Date('2026-08-03T12:00:00.000Z');
 
 const CODEX_ENV = { CODEX_THREAD_ID: 'thread-1', ORCA_TERMINAL_HANDLE: TERMINAL, SUPABASE_SERVICE_ROLE_KEY: 'must-not-leak' };
@@ -62,6 +64,8 @@ function putGrant(overrides = {}) {
     terminalHandle: TERMINAL,
     taskId: TASK,
     dispatchId: DISPATCH,
+    runId: RUN,
+    issuedByCoordinatorHandle: COORDINATOR,
     evidenceSource: 'read-only-usage-check',
     observedAt: '2026-08-03T11:55:00.000Z',
     expiresAt: '2026-08-03T12:40:00.000Z',
@@ -123,6 +127,16 @@ describe('Codex implementation changes without a grant', () => {
     expect(printed).toContain('scripts/verify-agent-routing.mjs');
     expect(printed).toContain('.githooks/pre-commit');
     expect(printed).toContain('package.json');
+  });
+
+  it('blocks a staged deletion of a product file', () => {
+    // ACMR만 보면 삭제가 가드를 통째로 빠져나간다.
+    stage('src/data/api.js');
+    git(workspace.primary, ['commit', '-q', '-m', 'seed api', '--no-verify']);
+    git(workspace.primary, ['rm', '-q', '--', 'src/data/api.js']);
+
+    expect(verify(['--staged'])).toBe(1);
+    expect(output.join('\n')).toContain('src/data/api.js');
   });
 
   it('blocks an unknown non-documentation path', () => {
@@ -297,13 +311,21 @@ describe('grant CLI and verifier agree', () => {
       'create',
       '--terminal', TERMINAL,
       '--task', TASK,
+      '--run', RUN,
       '--evidence-source', 'read-only-usage-check',
       '--observed-at', '2026-08-03T11:55:00.000Z',
       '--expires-at', '2026-08-03T12:40:00.000Z',
       '--allowed-path', 'src/data/api.js',
       '--remaining-scope', 'finish the remaining session restore work',
     ];
-    const grantOptions = { cwd: workspace.primary, now: NOW, orca, log: () => {}, error: () => {} };
+    const grantOptions = {
+      cwd: workspace.primary,
+      env: { ORCA_TERMINAL_HANDLE: COORDINATOR },
+      now: NOW,
+      orca,
+      log: () => {},
+      error: () => {},
+    };
     expect(runGrant({ ...grantOptions, argv: grantArgs })).toBe(0);
 
     stage('src/data/api.js');

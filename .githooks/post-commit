@@ -3,16 +3,16 @@
 # 승인된 Codex fallback 커밋 뒤 grant를 소진한다.
 #
 # pre-commit이 grant를 staged tree에 예약해 두므로, 그 tree가 실제 커밋된 경우에만
-# 소진한다. 예약과 다른 tree가 커밋됐으면 아무것도 하지 않는다.
+# 소진된다. 예약과 다른 tree가 커밋됐거나 이 터미널에 grant가 없으면 아무 일도 없다.
+#
+# 세션 주체를 셸에서 판정하지 않는다. Orca가 `CODEX_HOME`을 모든 터미널에 물려주기
+# 때문에 셸 수준의 표식 검사는 Claude 세션을 Codex로 오판한다. 대신 `consume`이
+# terminal·예약 tree·활성 상태를 모두 대조하므로, grant가 없는 세션에서는 조용히 실패한다.
 #
 # 이 훅은 어떤 경우에도 커밋을 실패시키지 않는다 — 커밋은 이미 만들어졌고, 소진 실패는
 # grant를 활성 상태로 남겨 다음 검증이 막는 방향으로 작동한다.
 
 if [ -z "$ORCA_TERMINAL_HANDLE" ]; then
-  exit 0
-fi
-
-if [ -z "$CODEX_THREAD_ID" ] && [ -z "$CODEX_HOME" ] && [ -z "$CODEX_SESSION_ID" ]; then
   exit 0
 fi
 

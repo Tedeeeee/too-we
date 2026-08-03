@@ -13,6 +13,7 @@ import {
   classifyPath,
   normalizeAllowedPaths,
   normalizeDispatch,
+  normalizeRun,
   validateGrant,
 } from './agent-routing-policy.mjs';
 
@@ -20,6 +21,8 @@ const NOW = new Date('2026-08-03T12:00:00.000Z');
 const TERMINAL = 'term_dd2dc226-4f0c-4af3-ac3c-ce5d97d135ec';
 const TASK = 'task_288b4e349139';
 const DISPATCH = 'ctx_e78bbc014ce7';
+const RUN = 'run_85aff4ff9daf';
+const COORDINATOR = 'term_1a050ae1-f664-434f-a545-0ea73728d5ed';
 
 const CODEX_ENV = { CODEX_THREAD_ID: 'thread-1', ORCA_TERMINAL_HANDLE: TERMINAL };
 
@@ -31,6 +34,8 @@ function grantFixture(overrides = {}) {
     terminalHandle: TERMINAL,
     taskId: TASK,
     dispatchId: DISPATCH,
+    runId: RUN,
+    issuedByCoordinatorHandle: COORDINATOR,
     evidenceSource: 'claude-response-classification',
     observedAt: '2026-08-03T11:50:00.000Z',
     expiresAt: '2026-08-03T12:30:00.000Z',
@@ -46,6 +51,7 @@ function dispatchFixture(overrides = {}) {
   return {
     dispatchId: DISPATCH,
     taskId: TASK,
+    runId: RUN,
     status: 'active',
     assigneeTerminal: TERMINAL,
     ...overrides,
@@ -87,8 +93,44 @@ describe('classifyAgent', () => {
     expect(classifyAgent({ CLAUDECODE: '' })).toBe('human');
   });
 
-  it('fails closed to Codex when identities contradict', () => {
-    expect(classifyAgent({ CODEX_THREAD_ID: 'thread', CLAUDECODE: '1' })).toBe('codex');
+  /**
+   * Orca는 모든 터미널에 `CODEX_HOME`과 `ORCA_CODEX_HOME`을 물려준다 — Codex 런타임 홈
+   * 경로일 뿐 세션 주체가 아니다. 실제 Claude 작업자 터미널에서 표식 **존재 여부만**
+   * 확인한 결과가 아래 fixture다(값은 넣지 않는다. 표식 이름과 presence만이 판정 근거다).
+   *
+   *   CODEX_THREAD_ID / CODEX_SESSION_ID / CODEX_CLI_VERSION : 없음
+   *   CODEX_HOME / ORCA_CODEX_HOME                           : 있음  ← 상속된 ambient 표식
+   *   CLAUDECODE / CLAUDE_CODE_ENTRYPOINT / ..._SESSION_ID    : 있음  ← provider-native
+   *
+   * ambient 표식을 우선하면 모든 Claude 세션이 Codex로 분류돼 테스트·빌드·커밋이 전부
+   * 막힌다. 그래서 provider-native Claude 표식이 상속된 ambient 표식을 이긴다.
+   */
+  it('treats a Claude worker that inherited ambient Codex markers as Claude', () => {
+    const inherited = {
+      CLAUDECODE: 'present',
+      CLAUDE_CODE_ENTRYPOINT: 'present',
+      CLAUDE_CODE_SESSION_ID: 'present',
+      CODEX_HOME: 'present',
+      ORCA_CODEX_HOME: 'present',
+      ORCA_TERMINAL_HANDLE: 'term_worker',
+    };
+    expect(classifyAgent(inherited)).toBe('claude');
+    expect(classifyAgent({ CODEX_HOME: 'present', CLAUDE_CODE_ENTRYPOINT: 'present' })).toBe('claude');
+  });
+
+  /**
+   * 반대 방향은 닫는다. `CODEX_THREAD_ID`처럼 세션 고유 표식이 있으면 Claude 표식이나
+   * `ORCA_AGENT` 값을 덧붙여도 Codex로 판정한다 — 표식을 덧칠해 가드를 우회할 수 없다.
+   */
+  it('fails closed to Codex when a session-unique Codex marker is present', () => {
+    expect(classifyAgent({ CODEX_THREAD_ID: 'present', CLAUDECODE: 'present' })).toBe('codex');
+    expect(classifyAgent({ CODEX_THREAD_ID: 'present', ORCA_AGENT: 'claude' })).toBe('codex');
+    expect(classifyAgent({ CODEX_SESSION_ID: 'present', CLAUDE_CODE_ENTRYPOINT: 'present' })).toBe('codex');
+  });
+
+  it('treats an Orca terminal with only ambient Codex markers as Codex', () => {
+    expect(classifyAgent({ CODEX_HOME: 'present', ORCA_TERMINAL_HANDLE: 'term_coordinator' })).toBe('codex');
+    expect(classifyAgent({ ORCA_CODEX_HOME: 'present' })).toBe('codex');
   });
 });
 
@@ -111,7 +153,7 @@ describe('classifyPath', () => {
     expect(classifyPath('scripts/agent-routing-policy.test.mjs')).toBe('implementation');
     expect(classifyPath('scripts/agent-routing-grant.mjs')).toBe('implementation');
     expect(classifyPath('scripts/verify-agent-routing.mjs')).toBe('implementation');
-    expect(classifyPath('scripts/install-agent-routing-hooks.mjs')).toBe('implementation');
+    expect(classifyPath('scripts/agent-routing-install-hooks.mjs')).toBe('implementation');
     // 훅 줄바꿈을 고정하는 파일이다. 여기가 열리면 훅을 CRLF로 되돌려 가드를 조용히 무력화할 수 있다.
     expect(classifyPath('.gitattributes')).toBe('implementation');
   });
@@ -176,6 +218,7 @@ describe('normalizeDispatch', () => {
     expect(normalizeDispatch(dispatchFixture())).toEqual({
       dispatchId: DISPATCH,
       taskId: TASK,
+      runId: RUN,
       status: 'active',
       terminalHandle: TERMINAL,
     });
@@ -189,6 +232,7 @@ describe('normalizeDispatch', () => {
         dispatch: {
           id: DISPATCH,
           task_id: TASK,
+          run_id: RUN,
           status: 'dispatched',
           assignee_handle: TERMINAL,
         },
@@ -197,6 +241,7 @@ describe('normalizeDispatch', () => {
     expect(normalizeDispatch(real)).toEqual({
       dispatchId: DISPATCH,
       taskId: TASK,
+      runId: RUN,
       status: 'dispatched',
       terminalHandle: TERMINAL,
     });
@@ -206,7 +251,7 @@ describe('normalizeDispatch', () => {
     const result = check({
       dispatch: {
         result: {
-          dispatch: { id: DISPATCH, task_id: TASK, status: 'dispatched', assignee_handle: TERMINAL },
+          dispatch: { id: DISPATCH, task_id: TASK, run_id: RUN, status: 'dispatched', assignee_handle: TERMINAL },
         },
       },
     });
@@ -215,9 +260,10 @@ describe('normalizeDispatch', () => {
   });
 
   it('reads common alternate field names', () => {
-    expect(normalizeDispatch({ id: DISPATCH, task: TASK, state: 'running', terminal: TERMINAL })).toEqual({
+    expect(normalizeDispatch({ id: DISPATCH, task: TASK, run: RUN, state: 'running', terminal: TERMINAL })).toEqual({
       dispatchId: DISPATCH,
       taskId: TASK,
+      runId: RUN,
       status: 'running',
       terminalHandle: TERMINAL,
     });
@@ -235,6 +281,26 @@ describe('normalizeDispatch', () => {
     expect(normalizeDispatch({})).toBeNull();
     expect(normalizeDispatch({ dispatches: [] })).toBeNull();
     expect(normalizeDispatch({ dispatchId: DISPATCH })).toBeNull();
+  });
+});
+
+describe('normalizeRun', () => {
+  it('reads the real `orca orchestration run-show --json` contract', () => {
+    const real = { result: { run: { id: RUN, status: 'active', coordinator_handle: COORDINATOR } } };
+    expect(normalizeRun(real)).toEqual({ runId: RUN, status: 'active', coordinatorHandle: COORDINATOR });
+  });
+
+  it('reads camelCase and bare shapes', () => {
+    expect(normalizeRun({ runId: RUN, coordinatorHandle: COORDINATOR, status: 'active' }).coordinatorHandle)
+      .toBe(COORDINATOR);
+    expect(normalizeRun({ id: RUN, coordinator: COORDINATOR }).coordinatorHandle).toBe(COORDINATOR);
+  });
+
+  it('returns null when the coordinator handle cannot be read', () => {
+    expect(normalizeRun(null)).toBeNull();
+    expect(normalizeRun('run_85aff4ff9daf')).toBeNull();
+    expect(normalizeRun({})).toBeNull();
+    expect(normalizeRun({ result: { run: { id: RUN } } })).toBeNull();
   });
 });
 
@@ -369,6 +435,33 @@ describe('validateGrant', () => {
       expect(result.ok, status).toBe(false);
       expect(result.reasons, status).toContain('dispatch_inactive');
     }
+  });
+
+  it('requires a Run id and the issuing coordinator handle', () => {
+    expect(check({ grant: grantFixture({ runId: undefined }) }).reasons).toContain('run_id_missing');
+    expect(check({ grant: grantFixture({ runId: 'not-a-run' }) }).reasons).toContain('run_id_missing');
+    expect(check({ grant: grantFixture({ issuedByCoordinatorHandle: undefined }) }).reasons)
+      .toContain('coordinator_handle_missing');
+    expect(check({ grant: grantFixture({ issuedByCoordinatorHandle: 'nothandle' }) }).reasons)
+      .toContain('coordinator_handle_missing');
+  });
+
+  it('blocks a grant a worker issued to itself', () => {
+    // 코디네이터와 구현 작업자가 같은 terminal이면 자기 발급이다 (AGENTS.md는 분리를 요구한다).
+    const selfIssued = grantFixture({ issuedByCoordinatorHandle: TERMINAL });
+    const result = check({ grant: selfIssued });
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain('grant_self_issued');
+  });
+
+  it('blocks a dispatch that belongs to a different Run', () => {
+    const result = check({ dispatch: dispatchFixture({ runId: 'run_other' }) });
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain('dispatch_run_mismatch');
+  });
+
+  it('fails closed when the dispatch carries no Run id', () => {
+    expect(check({ dispatch: dispatchFixture({ runId: undefined }) }).reasons).toContain('dispatch_run_mismatch');
   });
 
   it('blocks a grant reserved for a different staged tree', () => {

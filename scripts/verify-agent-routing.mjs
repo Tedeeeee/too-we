@@ -48,9 +48,12 @@ function lines(text) {
  * @returns {string[]} 저장소 상대 POSIX 경로
  */
 export function collectChangedPaths({ cwd, staged }) {
-  const collected = [gitOut(cwd, ['diff', '--cached', '--name-only', '--diff-filter=ACMR'])];
+  // 삭제(D)와 형식 변경(T)도 반드시 센다. ACMR만 보면 `git rm src/data/api.js`나
+  // `git rm .githooks/pre-commit`이 가드에 보이지 않아 그대로 커밋된다.
+  const filter = '--diff-filter=ACMRTD';
+  const collected = [gitOut(cwd, ['diff', '--cached', '--name-only', filter])];
   if (!staged) {
-    collected.push(gitOut(cwd, ['diff', '--name-only', '--diff-filter=ACMR']));
+    collected.push(gitOut(cwd, ['diff', '--name-only', filter]));
     collected.push(gitOut(cwd, ['ls-files', '--others', '--exclude-standard']));
   }
   const unique = new Set();
