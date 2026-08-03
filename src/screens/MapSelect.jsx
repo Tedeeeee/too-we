@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router';
 import { palette, fonts } from '@/styles/tokens';
 import Screen from '@/components/Screen';
 import MaskIcon from '@/components/MaskIcon';
@@ -10,44 +10,192 @@ import { uiSvg } from '@assets/svg';
 import { useApp } from '@/data/store';
 import * as api from '@/data/api';
 
-/** 지도(장소 선택) — 주변 장소를 골라 5초 기록으로 이동 */
+const DEFAULT_CENTER = { lat: 37.5443, lng: 127.0557 };
+const GEOLOCATION_OPTIONS = {
+  enableHighAccuracy: false,
+  timeout: 8_000,
+  maximumAge: 300_000,
+};
+
+const validLocation = (lat, lng) =>
+  Number.isFinite(Number(lat))
+  && Number.isFinite(Number(lng))
+  && Number(lat) >= -90
+  && Number(lat) <= 90
+  && Number(lng) >= -180
+  && Number(lng) <= 180;
+
+const locationErrorMessage = (error) => {
+  if (error?.code === 1) return '위치 권한 없이도 장소를 검색하고 선택할 수 있어요.';
+  if (error?.code === 3) return '현재 위치 확인이 늦어지고 있어요. 키워드로 검색해 주세요.';
+  return '현재 위치를 확인할 수 없어요. 키워드로 검색해 주세요.';
+};
+
+/** 지도(장소 선택) — 키워드 검색 결과를 지도와 연결하고 진입 intent를 지킨다. */
 export default function MapSelect() {
   const navigate = useNavigate();
+  const routeLocation = useLocation();
   const { records } = useApp();
+  const [keyword, setKeyword] = useState('');
   const [places, setPlaces] = useState([]);
+  const [selectedPlaceId, setSelectedPlaceId] = useState(null);
+  const [searchState, setSearchState] = useState('idle');
+  const [userLocation, setUserLocation] = useState(null);
+  const [locationMessage, setLocationMessage] = useState('현재 위치를 확인하고 있어요.');
+  const requestSequenceRef = useRef(0);
+  const inFlightSearchesRef = useRef(new Set());
+  const lastSubmittedKeywordRef = useRef('');
+  const mountedRef = useRef(true);
+  const geolocationRequestedRef = useRef(false);
+
+  const isNewRecordIntent = routeLocation.state?.intent === 'new-record';
 
   useEffect(() => {
-    api.getNearbyPlaces().then(setPlaces);
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestSequenceRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (geolocationRequestedRef.current) return undefined;
+    geolocationRequestedRef.current = true;
+    const geolocation = globalThis.navigator?.geolocation;
+
+    if (typeof geolocation?.getCurrentPosition !== 'function') {
+      setLocationMessage('현재 위치를 확인할 수 없어요. 키워드로 검색해 주세요.');
+      return undefined;
+    }
+
+    try {
+      geolocation.getCurrentPosition(
+        (position) => {
+          if (!mountedRef.current) return;
+          const lat = position?.coords?.latitude;
+          const lng = position?.coords?.longitude;
+          if (!validLocation(lat, lng)) {
+            setLocationMessage('현재 위치를 확인할 수 없어요. 키워드로 검색해 주세요.');
+            return;
+          }
+          setUserLocation({ lat: Number(lat), lng: Number(lng) });
+          setLocationMessage('현재 위치를 반영했어요.');
+        },
+        (error) => {
+          if (mountedRef.current) setLocationMessage(locationErrorMessage(error));
+        },
+        GEOLOCATION_OPTIONS,
+      );
+    } catch {
+      setLocationMessage('현재 위치를 확인할 수 없어요. 키워드로 검색해 주세요.');
+    }
+    return undefined;
   }, []);
 
   // 상단 메모 칩: 최근 기록의 첫 태그 문구
   const memoChips = useMemo(() => {
-    const texts = records
-      .flatMap((r) => r.tags)
-      .map((t) => t.replace(/^#\s*/, ''))
+    const texts = (Array.isArray(records) ? records : [])
+      .flatMap((record) => (Array.isArray(record?.tags) ? record.tags : []))
+      .map((tag) => String(tag).replace(/^#\s*/, ''))
       .slice(0, 2);
     while (texts.length < 2 && texts.length > 0) texts.push(texts[0]);
     return texts;
   }, [records]);
 
+  const visiblePlaces = places.slice(0, 3);
+  const selectedPlace = visiblePlaces.find((place) => place.id === selectedPlaceId);
+  const mapCenter = selectedPlace && validLocation(selectedPlace.lat, selectedPlace.lng)
+    ? { lat: Number(selectedPlace.lat), lng: Number(selectedPlace.lng) }
+    : userLocation || DEFAULT_CENTER;
+
+  const searchPlaces = async (rawKeyword) => {
+    const trimmedKeyword = String(rawKeyword ?? '').trim();
+    if (!trimmedKeyword) {
+      requestSequenceRef.current += 1;
+      setSearchState('validation');
+      return;
+    }
+
+    const query = {
+      keyword: trimmedKeyword,
+      ...(userLocation ? { lat: userLocation.lat, lng: userLocation.lng } : {}),
+    };
+    const requestKey = JSON.stringify(query);
+    if (inFlightSearchesRef.current.has(requestKey)) return;
+
+    inFlightSearchesRef.current.add(requestKey);
+    const requestId = requestSequenceRef.current + 1;
+    requestSequenceRef.current = requestId;
+    lastSubmittedKeywordRef.current = trimmedKeyword;
+    setSearchState('loading');
+
+    try {
+      const result = await api.getNearbyPlaces(query);
+      if (!mountedRef.current || requestSequenceRef.current !== requestId) return;
+      const nextPlaces = Array.isArray(result)
+        ? result.filter((place) => place && place.id !== undefined && place.id !== null)
+        : [];
+      setPlaces(nextPlaces);
+      setSelectedPlaceId(null);
+      setSearchState(nextPlaces.length ? 'success' : 'empty');
+    } catch {
+      if (!mountedRef.current || requestSequenceRef.current !== requestId) return;
+      setSearchState('error');
+    } finally {
+      inFlightSearchesRef.current.delete(requestKey);
+    }
+  };
+
+  const submitSearch = (event) => {
+    event.preventDefault();
+    searchPlaces(keyword);
+  };
+
+  const selectPlace = (place) => {
+    if (!place) return;
+    setSelectedPlaceId(place.id);
+    if (!isNewRecordIntent) return;
+
+    const snapshot = Object.freeze({ ...place });
+    navigate('/record', {
+      state: Object.freeze({
+        place: snapshot,
+        placeId: snapshot.id,
+        name: snapshot.name,
+        placeName: snapshot.name,
+        category: snapshot.category,
+      }),
+    });
+  };
+
+  const selectMarker = (placeId) => {
+    const place = visiblePlaces.find((candidate) => candidate.id === placeId);
+    if (place) selectPlace(place);
+  };
+
   const rowTops = [62, 141, 219];
   const rowHeights = [78, 77, 77];
-
-  const selectPlace = (place) =>
-    navigate('/record', {
-      state: { placeId: place.id, placeName: place.name, category: place.category },
-    });
 
   return (
     <Screen>
       <MapView
-        center={{ lat: 37.5443, lng: 127.0557 }}
-        markers={places.map((p) => ({ id: p.id, lat: p.lat, lng: p.lng }))}
+        center={mapCenter}
+        markers={visiblePlaces.map((place) => ({
+          id: place.id,
+          name: place.name,
+          lat: place.lat,
+          lng: place.lng,
+        }))}
+        selectedId={selectedPlaceId}
+        onMarkerClick={selectMarker}
         width={402}
         height={560}
       />
       <BackButton left={16} top={68} />
-      <div
+
+      <form
+        onSubmit={submitSearch}
+        role="search"
         style={{
           position: 'absolute',
           left: 58,
@@ -58,17 +206,85 @@ export default function MapSelect() {
           borderRadius: 999,
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'flex-end',
-          padding: '0 16px',
+          padding: '0 8px 0 16px',
           boxSizing: 'border-box',
+          gap: 8,
         }}
       >
-        <MaskIcon src={uiSvg.search} color={palette.text} size={20} />
+        <label
+          htmlFor="map-place-search"
+          style={{
+            position: 'absolute',
+            width: 1,
+            height: 1,
+            padding: 0,
+            margin: -1,
+            overflow: 'hidden',
+            clip: 'rect(0, 0, 0, 0)',
+            whiteSpace: 'nowrap',
+            border: 0,
+          }}
+        >
+          장소 검색어
+        </label>
+        <input
+          id="map-place-search"
+          type="search"
+          value={keyword}
+          onChange={(event) => setKeyword(event.target.value)}
+          placeholder="장소를 검색해 주세요"
+          autoComplete="off"
+          style={{
+            flex: 1,
+            minWidth: 0,
+            border: 0,
+            outline: 0,
+            background: 'transparent',
+            color: palette.text,
+            fontFamily: fonts.hand,
+            fontSize: 20,
+          }}
+        />
+        <button
+          type="submit"
+          aria-label="장소 검색"
+          style={{
+            width: 32,
+            height: 32,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            flexShrink: 0,
+          }}
+        >
+          <MaskIcon src={uiSvg.search} color={palette.text} size={20} />
+        </button>
+      </form>
+
+      <div
+        role="status"
+        aria-label="위치 상태"
+        style={{
+          position: 'absolute',
+          left: 58,
+          top: 158,
+          maxWidth: 310,
+          padding: '3px 10px',
+          borderRadius: 999,
+          background: 'rgba(255,252,244,0.9)',
+          color: palette.textMuted,
+          fontFamily: fonts.hand,
+          fontSize: 15,
+        }}
+      >
+        {locationMessage}
       </div>
+
       <div style={{ position: 'absolute', left: 47, top: 115, display: 'flex', flexDirection: 'row', gap: 12 }}>
-        {memoChips.map((text, i) => (
+        {memoChips.map((text, index) => (
           <div
-            key={i}
+            key={`${text}-${index}`}
             style={{
               display: 'flex',
               flexDirection: 'row',
@@ -102,8 +318,10 @@ export default function MapSelect() {
           </div>
         ))}
       </div>
-      {/* 주변 장소 바텀시트 */}
+
+      {/* 검색 결과 바텀시트 */}
       <div
+        aria-busy={searchState === 'loading'}
         style={{
           position: 'absolute',
           left: 0,
@@ -126,35 +344,121 @@ export default function MapSelect() {
           }}
         />
         <div style={{ position: 'absolute', left: 16, top: 36, fontFamily: fonts.hand, fontSize: 16, color: palette.textMuted }}>
-          주변 장소
+          {searchState === 'idle' ? '주변 장소' : '검색 결과'}
         </div>
-        {places.slice(0, 3).map((place, i) => (
-          <div key={place.id}>
-            <div style={{ position: 'absolute', left: 20, top: rowTops[i] + 10, fontFamily: fonts.hand, fontSize: 24, color: palette.textStrong }}>
-              {place.name}
-            </div>
-            <div style={{ position: 'absolute', left: 20, top: rowTops[i] + 42, fontFamily: fonts.hand, fontSize: 20, color: palette.textMuted }}>
-              {place.category} · {place.address}
-            </div>
-            <div style={{ position: 'absolute', left: 322, top: rowTops[i] + 26, fontFamily: fonts.hand, fontSize: 20, color: palette.textMuted }}>
-              {place.walk}
-            </div>
-            <HandDrawnLine
-              color={palette.beige}
-              width={362}
-              height={12}
+
+        {searchState === 'idle' && (
+          <div style={{ position: 'absolute', left: 20, top: 78, fontFamily: fonts.hand, fontSize: 20, color: palette.textMuted }}>
+            키워드로 장소를 찾아보세요.
+          </div>
+        )}
+        {searchState === 'validation' && (
+          <div role="status" aria-label="검색 상태" style={{ position: 'absolute', left: 20, top: 78, fontFamily: fonts.hand, fontSize: 20, color: palette.textMuted }}>
+            검색어를 입력해 주세요.
+          </div>
+        )}
+        {searchState === 'loading' && (
+          <div role="status" aria-label="검색 상태" style={{ position: 'absolute', left: 20, top: 78, fontFamily: fonts.hand, fontSize: 20, color: palette.textMuted }}>
+            장소를 찾고 있어요…
+          </div>
+        )}
+        {searchState === 'empty' && (
+          <div role="status" aria-label="검색 상태" style={{ position: 'absolute', left: 20, top: 78, fontFamily: fonts.hand, fontSize: 20, color: palette.textMuted }}>
+            검색 결과가 없어요. 다른 키워드로 찾아보세요.
+          </div>
+        )}
+        {searchState === 'error' && (
+          <div
+            role="alert"
+            style={{
+              position: 'absolute',
+              left: 20,
+              right: 20,
+              top: 70,
+              fontFamily: fonts.hand,
+              fontSize: 20,
+              color: palette.text,
+            }}
+          >
+            <div>장소를 불러오지 못했어요. 다시 시도해 주세요.</div>
+            <button
+              type="button"
+              aria-label="검색 다시 시도"
+              onClick={() => searchPlaces(lastSubmittedKeywordRef.current)}
+              style={{
+                marginTop: 12,
+                padding: '7px 14px',
+                borderRadius: 999,
+                background: palette.card,
+                color: palette.olive,
+                fontFamily: fonts.sans,
+                fontSize: 14,
+                cursor: 'pointer',
+              }}
+            >
+              다시 시도
+            </button>
+          </div>
+        )}
+
+        {searchState === 'success' && visiblePlaces.map((place, index) => {
+          const selected = place.id === selectedPlaceId;
+          return (
+            <button
+              key={place.id}
+              type="button"
+              aria-label={`${place.name} 결과 선택`}
+              aria-pressed={selected}
+              onClick={() => selectPlace(place)}
               style={{
                 position: 'absolute',
-                left: 20,
-                top: rowTops[i] + rowHeights[i] - 6,
+                left: 0,
+                top: rowTops[index],
+                width: 402,
+                height: rowHeights[index],
+                border: 0,
+                background: selected ? 'rgba(233,237,220,0.75)' : 'transparent',
+                textAlign: 'left',
+                cursor: 'pointer',
               }}
-            />
-            <div
-              onClick={() => selectPlace(place)}
-              style={{ position: 'absolute', left: 0, top: rowTops[i], width: 402, height: rowHeights[i], cursor: 'pointer' }}
-            />
-          </div>
-        ))}
+            >
+              <span style={{ position: 'absolute', left: 20, top: 10, fontFamily: fonts.hand, fontSize: 24, color: palette.textStrong }}>
+                {place.name}
+              </span>
+              <span
+                style={{
+                  position: 'absolute',
+                  left: 20,
+                  top: 42,
+                  width: 285,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  fontFamily: fonts.hand,
+                  fontSize: 20,
+                  color: palette.textMuted,
+                }}
+              >
+                {[place.category, place.address].filter(Boolean).join(' · ')}
+              </span>
+              {place.walk && (
+                <span style={{ position: 'absolute', right: 20, top: 26, fontFamily: fonts.hand, fontSize: 20, color: palette.textMuted }}>
+                  {place.walk}
+                </span>
+              )}
+              <HandDrawnLine
+                color={palette.beige}
+                width={362}
+                height={12}
+                style={{
+                  position: 'absolute',
+                  left: 20,
+                  top: rowHeights[index] - 6,
+                }}
+              />
+            </button>
+          );
+        })}
       </div>
     </Screen>
   );
