@@ -73,7 +73,8 @@ export default function VisitPhotoManager({
   const visiblePhotoIds = new Set(visiblePhotos.map((photo) => photo.id));
   const reservedAttempts = attempts.filter((attempt) => {
     const uploadedPhotoId = attempt.result?.photo?.id;
-    return !uploadedPhotoId || !visiblePhotoIds.has(uploadedPhotoId);
+    return !uploadedPhotoId
+      || (!visiblePhotoIds.has(uploadedPhotoId) && !deletedPhotoIds.has(uploadedPhotoId));
   });
   const occupiedCount = Math.min(MAX_PHOTOS, visiblePhotos.length + reservedAttempts.length);
 

@@ -150,6 +150,41 @@ describe('VisitPhotoManager delete rights', () => {
     expect(screen.getByLabelText('partner 사진 (짝궁 업로드, 읽기 전용)')).toBeInTheDocument();
   });
 
+  it('이 세션에서 업로드한 내 사진을 삭제하면 성공 기록도 숨기고 5장 용량을 다시 비운다', async () => {
+    const user = userEvent.setup();
+    const uploaded = file('uploaded.jpg');
+    const upload = succeeded(uploaded, 'client-uploaded', 'photo-uploaded');
+    const replacements = Array.from({ length: 5 }, (_, index) => file(`replacement-${index + 1}.jpg`));
+    const addPhotos = vi.fn().mockImplementation(async (_recordId, files) => (
+      files.map((source, index) => succeeded(source, `replacement-${index + 1}`, `photo-${index + 1}`))
+    ));
+    const deletePhoto = vi.fn().mockResolvedValue({
+      photoId: 'photo-uploaded',
+      status: 'succeeded',
+      error: null,
+    });
+    renderManager({
+      photos: [photo('photo-uploaded', true)],
+      uploads: [upload],
+      addPhotos,
+      deletePhoto,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'photo-uploaded 사진 삭제' }));
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText('photo-uploaded 사진')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('uploaded.jpg 업로드 상태')).not.toBeInTheDocument();
+      expect(screen.getByText('0/5')).toBeInTheDocument();
+    });
+
+    const input = screen.getByLabelText('사진 추가');
+    expect(input).toBeEnabled();
+    fireEvent.change(input, { target: { files: replacements } });
+
+    await waitFor(() => expect(addPhotos).toHaveBeenCalledWith('visit-1', replacements));
+  });
+
   it('삭제 연속 클릭을 억제하고 실패한 내 사진만 안전하게 재시도한다', async () => {
     const user = userEvent.setup();
     const pending = deferred();
