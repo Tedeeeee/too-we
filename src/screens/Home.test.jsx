@@ -41,6 +41,7 @@ function renderHome(app = {}) {
         <Route path="/" element={<Home />} />
         <Route path="/map" element={<Destination />} />
         <Route path="/record" element={<Destination />} />
+        <Route path="/place/:recordId" element={<Destination />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -131,5 +132,80 @@ describe('Home pending partition', () => {
   it('아직 데이터가 없는 로딩 형태도 빈 카드로 안전하게 렌더링한다', () => {
     expect(() => renderHome({ couple: null, records: undefined })).not.toThrow();
     expect(screen.getByText('아래 + 버튼으로 새 기록을 시작해요')).toBeInTheDocument();
+  });
+});
+
+describe('Home restored record states', () => {
+  it('true empty는 장식용 빈 카드만 표시한다', () => {
+    const { container } = renderHome({ records: [] });
+
+    expect(container.querySelectorAll('[data-pending-card]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-home-carousel-dots] > div')).toHaveLength(1);
+    expect(container.querySelector('[data-home-month-list]')).not.toBeInTheDocument();
+  });
+
+  it('pending-only는 note CTA와 장식용 빈 카드를 표시하고 월별 이력은 숨긴다', () => {
+    const pending = record({ id: 'pending-only', placeName: '대기 전용 장소' });
+    const { container } = renderHome({ records: [pending] });
+
+    expect(container.querySelectorAll('[data-pending-card]')).toHaveLength(2);
+    expect(screen.getByRole('button', { name: '한 줄을 남겨주세요' })).toBeInTheDocument();
+    expect(container.querySelector('[data-home-month-list]')).not.toBeInTheDocument();
+  });
+
+  it('complete-only는 장식용 빈 카드와 월별 이력을 함께 표시한다', () => {
+    const complete = record({
+      id: 'complete-only',
+      placeName: '완료 전용 장소',
+      pending: false,
+    });
+    const { container } = renderHome({ records: [complete] });
+
+    expect(container.querySelectorAll('[data-pending-card]')).toHaveLength(1);
+    expect(within(container.querySelector('[data-home-month-list]')).getByText('완료 전용 장소')).toBeInTheDocument();
+  });
+
+  it('1월과 직전 12월을 서로 다른 최신순 그룹으로 유지하고 기록 id로 이동한다', async () => {
+    const user = userEvent.setup();
+    const january = record({
+      id: 'january',
+      placeName: '1월 겨울 장소',
+      date: '2026-01-17T10:00:00+09:00',
+      pending: false,
+    });
+    const december = record({
+      id: 'december',
+      placeName: '12월 겨울 장소',
+      date: '2025-12-20T10:00:00+09:00',
+      pending: false,
+    });
+    const { container } = renderHome({ records: [december, january] });
+    const monthList = container.querySelector('[data-home-month-list]');
+
+    expect(within(monthList).getAllByText(/월의 기록$/).map((heading) => heading.textContent)).toEqual([
+      '1월의 기록',
+      '12월의 기록',
+    ]);
+
+    await user.click(within(monthList).getByText('12월 겨울 장소'));
+
+    expect(await screen.findByText('목적지 화면')).toBeInTheDocument();
+    expect(destinationLocation.pathname).toBe('/place/december');
+  });
+
+  it('유효하지 않은 날짜 기록은 NaN 월이나 깨진 sticker를 만들지 않고 제외한다', () => {
+    const invalidPending = record({ id: 'bad-pending', placeName: '잘못된 대기', date: 'not-a-date' });
+    const invalidComplete = record({
+      id: 'bad-complete',
+      placeName: '잘못된 완료',
+      date: undefined,
+      pending: false,
+    });
+    const { container } = renderHome({ records: [invalidPending, invalidComplete] });
+
+    expect(screen.queryByText('잘못된 대기')).not.toBeInTheDocument();
+    expect(screen.queryByText('잘못된 완료')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-home-month-list]')).not.toBeInTheDocument();
+    expect(container).not.toHaveTextContent('NaN');
   });
 });

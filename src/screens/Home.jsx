@@ -14,6 +14,12 @@ const GROUP_HEADER_H = 49; // 월 헤더 아래 첫 카드까지
 const CARD_STEP = 165; // 카드 153 + 간격 12
 const GROUP_GAP = 24; // 월 그룹 사이
 
+const hasValidRecordDate = (record) => (
+  typeof record?.date === 'string'
+  && record.date.trim().length > 0
+  && Number.isFinite(new Date(record.date).getTime())
+);
+
 /** 홈(main) — 기록 카드 캐러셀 + 월별 기록 */
 export default function Home() {
   const navigate = useNavigate();
@@ -25,21 +31,22 @@ export default function Home() {
   const records = app.records;
   const [carouselIdx, setCarouselIdx] = useState(0);
   const safeRecords = Array.isArray(records) ? records : [];
+  const datedRecords = useMemo(() => safeRecords.filter(hasValidRecordDate), [safeRecords]);
 
   // 캐러셀: 내 한 줄이 아직 없는(진행 중) 기록 카드들 + 마지막 빈 카드
   const pendingRecords = useMemo(
-    () => safeRecords.filter((record) => record?.pending === true),
-    [safeRecords],
+    () => datedRecords.filter((record) => record?.pending === true),
+    [datedRecords],
   );
   const dotCount = pendingRecords.length + 1;
 
   // 월별 기록: 완성된 기록을 최신 달 기준으로 묶는다
   const completeRecords = useMemo(
     () =>
-      safeRecords
+      datedRecords
         .filter((record) => record?.pending === false)
         .sort((a, b) => new Date(b.date) - new Date(a.date)),
-    [safeRecords],
+    [datedRecords],
   );
   /**
    * 월별 그룹. completeRecords가 최신순이라 그룹도 최신순으로 나온다.
