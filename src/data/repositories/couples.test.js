@@ -427,14 +427,54 @@ describe('completeOnboarding', () => {
 });
 
 describe('disconnectCouple', () => {
-  it('disconnect_couple RPC를 멱등 키와 함께 부른다', async () => {
+  it('disconnect_couple RPC를 안정적인 멱등 키와 함께 부르고 purge 내부값은 노출하지 않는다', async () => {
     const { client, couples } = build({
       tables: connectedTables(),
-      rpc: { disconnect_couple: okEnvelope({ couple_id: 'c1', purge_job_id: 'j1' }) },
+      rpc: {
+        disconnect_couple: okEnvelope({
+          couple_id: 'c1',
+          purge_job_id: 'j1',
+          purge_due_at: '2026-05-04T00:00:00Z',
+        }),
+      },
     });
 
-    await expect(couples.disconnectCouple()).resolves.toMatchObject({ coupleId: 'c1', purgeJobId: 'j1' });
+    const result = await couples.disconnectCouple();
+
+    expect(result).toEqual({ disconnected: true, coupleId: 'c1', replayed: false });
+    expect(result).not.toHaveProperty('purgeJobId');
+    expect(result).not.toHaveProperty('purgeDueAt');
     expect(lastRpcArgs(client, 'disconnect_couple')).toEqual({ p_request_key: 'request-key-1' });
+  });
+
+  it('실패 후 같은 해제 의도를 재시도할 때 호출자가 준 키와 입력 객체를 그대로 보존한다', async () => {
+    let attempts = 0;
+    const { client, couples } = build({
+      tables: connectedTables(),
+      rpc: {
+        disconnect_couple: () => {
+          attempts += 1;
+          if (attempts === 1) return transportFailure(new TypeError('Failed to fetch'));
+          return okEnvelope({ couple_id: 'c1' }, true);
+        },
+      },
+    });
+    const options = Object.freeze({ requestKey: 'disconnect-intent-1' });
+
+    await expect(couples.disconnectCouple(options)).rejects.toMatchObject({
+      code: ERROR_CODES.network,
+    });
+    await expect(couples.disconnectCouple(options)).resolves.toEqual({
+      disconnected: true,
+      coupleId: 'c1',
+      replayed: true,
+    });
+
+    expect(client.calls.rpc.map((call) => call.args.p_request_key)).toEqual([
+      'disconnect-intent-1',
+      'disconnect-intent-1',
+    ]);
+    expect(options).toEqual({ requestKey: 'disconnect-intent-1' });
   });
 
   it('해제 요청이 실패하면 거부하고 아무것도 지우지 않는다', async () => {

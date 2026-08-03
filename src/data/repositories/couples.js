@@ -82,8 +82,8 @@ export function createCouplesRepository({ getClient, session, requestKey, now = 
         p_request_key: requestKey(options.requestKey),
       });
       return {
+        disconnected: true,
         coupleId: result.data?.couple_id ?? null,
-        purgeJobId: result.data?.purge_job_id ?? null,
         replayed: result.replayed,
       };
     },

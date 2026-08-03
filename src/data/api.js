@@ -19,6 +19,7 @@ export const reissueCoupleInvite = (...args) => repositories.couples.reissueCoup
 export const connectWithCode = (...args) => repositories.couples.connectWithCode(...args);
 export const setMyName = (...args) => repositories.couples.setMyName(...args);
 export const completeOnboarding = (...args) => repositories.couples.completeOnboarding(...args);
+export const disconnectCouple = (...args) => repositories.couples.disconnectCouple(...args);
 
 export const getNearbyPlaces = (...args) => repositories.places.getNearbyPlaces(...args);
 export const getPlace = (...args) => repositories.places.getPlace(...args);
@@ -32,4 +33,7 @@ export const uploadVisitPhotos = (...args) => repositories.photos.uploadVisitPho
 export const deleteVisitPhoto = (...args) => repositories.photos.deleteVisitPhoto(...args);
 
 export const getWishlist = (...args) => repositories.wishlist.getWishlist(...args);
+export const createWishlistPlace = (...args) => repositories.wishlist.createWishlistPlace(...args);
+export const updateWishlistPlace = (...args) => repositories.wishlist.updateWishlistPlace(...args);
+export const deleteWishlistPlace = (...args) => repositories.wishlist.deleteWishlistPlace(...args);
 export const getSettings = (...args) => repositories.settings.getSettings(...args);
