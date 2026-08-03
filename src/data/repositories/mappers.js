@@ -115,6 +115,7 @@ export function mapVisit(row, userId) {
     placeName: row.place_name,
     category: row.place_category ?? '',
     date: row.visited_at,
+    pending: normalizeEntryText(myEntry?.note) === null,
     rating: normalizeRating(myEntry?.rating) ?? 0,
     flower: row.flower_key ?? null,
     tags,

@@ -36,12 +36,16 @@ const visitRow = (over = {}) => ({
 });
 
 const build = (config = {}) => {
-  const { placeSearchAdapter, ...clientConfig } = config;
+  const {
+    placeSearchAdapter,
+    newRequestKey = () => 'request-key-1',
+    ...clientConfig
+  } = config;
   const client = createFakeSupabaseClient({ userId: ME, ...clientConfig });
   const repositories = createRepositories({
     client,
     placeSearchAdapter,
-    newRequestKey: () => 'request-key-1',
+    newRequestKey,
     now: () => NOW,
   });
   return { client, visits: repositories.visits };
@@ -155,9 +159,9 @@ describe('saveFiveSecondRecord — 기다리는 기록에 내 한 줄 붙이기'
       rpc: { upsert_my_visit_entry: okEnvelope({ visit_id: 'v1', pending: false }) },
     });
 
-    await expect(visits.saveFiveSecondRecord({ recordId: 'v1', text: '내 한 줄', rating: 3 })).resolves.toMatchObject({
-      id: 'v1',
-    });
+    const record = await visits.saveFiveSecondRecord({ recordId: 'v1', text: '내 한 줄', rating: 3 });
+
+    expect(record).toMatchObject({ id: 'v1', pending: false });
 
     expect(rpcNames(client)).toEqual(['upsert_my_visit_entry']);
     expect(lastRpcArgs(client, 'upsert_my_visit_entry')).toEqual({
@@ -233,14 +237,13 @@ describe('saveFiveSecondRecord — 기다리는 기록에 내 한 줄 붙이기'
 });
 
 describe('saveFiveSecondRecord — 새 기록', () => {
-  const NEW_ROW = visitRow({ id: 'v2', visit_entries: [{ author_id: ME, note: '내 한 줄', rating: 3 }] });
+  const NEW_ROW = visitRow({ id: 'v2', flower_key: null });
 
-  it('create_visit → upsert_my_visit_entry 순서로 부른다', async () => {
+  it('새 방문은 create_visit 한 번으로만 만들고 개인 entry를 함께 쓰지 않는다', async () => {
     const { client, visits } = build({
       tables: { visits: [NEW_ROW] },
       rpc: {
         create_visit: okEnvelope({ visit_id: 'v2', couple_id: 'c1' }),
-        upsert_my_visit_entry: okEnvelope({ visit_id: 'v2' }),
       },
       placeSearchAdapter: {
         getPlace: async () => ({ id: 'kakao-1', name: '성수동 블루보틀', category: '카페' }),
@@ -248,31 +251,57 @@ describe('saveFiveSecondRecord — 새 기록', () => {
     });
 
     await expect(visits.saveFiveSecondRecord({ placeId: 'kakao-1', text: '내 한 줄', rating: 3 })).resolves.toMatchObject(
-      { id: 'v2' },
+      { id: 'v2', pending: true, flower: null, entries: [] },
     );
 
-    expect(rpcNames(client)).toEqual(['create_visit', 'upsert_my_visit_entry']);
+    expect(rpcNames(client)).toEqual(['create_visit']);
   });
 
-  it('create_visit에 필수 멱등 키와 장소 스냅샷을 보낸다', async () => {
+  it('정규화된 Kakao 장소 스냅샷·방문 시각·호출자 멱등 키만 보내고 입력을 바꾸지 않는다', async () => {
     const { client, visits } = build({
       tables: { visits: [NEW_ROW] },
       rpc: {
         create_visit: okEnvelope({ visit_id: 'v2' }),
-        upsert_my_visit_entry: okEnvelope({ visit_id: 'v2' }),
-      },
-      placeSearchAdapter: {
-        getPlace: async () => ({ id: 'kakao-1', name: '성수동 블루보틀', category: '카페' }),
       },
     });
+    const input = {
+      place: {
+        id: 'kakao-1',
+        name: '성수동 블루보틀',
+        category: '음식점 > 카페',
+        address: '서울 성동구 성수동 1',
+        roadAddress: '서울 성동구 연무장길 7',
+        phone: '02-000-0000',
+        url: 'https://place.map.kakao.com/kakao-1',
+        lat: 37.5443,
+        lng: 127.0557,
+        provider: 'kakao',
+      },
+      date: '2026-05-03T10:14:00+09:00',
+      requestKey: 'visit-intent-1',
+    };
+    const original = structuredClone(input);
 
-    await visits.saveFiveSecondRecord({ placeId: 'kakao-1', text: 'x', rating: 3, date: '2026-05-03T10:14:00Z' });
+    await visits.saveFiveSecondRecord(input);
 
     expect(lastRpcArgs(client, 'create_visit')).toEqual({
-      p_place: { provider: 'kakao', provider_id: 'kakao-1', name: '성수동 블루보틀', category: '카페' },
-      p_visited_at: '2026-05-03T10:14:00.000Z',
-      p_request_key: 'request-key-1',
+      p_place: {
+        provider: 'kakao',
+        provider_id: 'kakao-1',
+        name: '성수동 블루보틀',
+        category: '음식점 > 카페',
+        address: '서울 성동구 성수동 1',
+        road_address: '서울 성동구 연무장길 7',
+        phone: '02-000-0000',
+        url: 'https://place.map.kakao.com/kakao-1',
+        lat: 37.5443,
+        lng: 127.0557,
+      },
+      p_visited_at: '2026-05-03T01:14:00.000Z',
+      p_request_key: 'visit-intent-1',
     });
+    expect(input).toEqual(original);
+    expect(rpcNames(client)).toEqual(['create_visit']);
   });
 
   it('호출자가 준 멱등 키를 재시도에 그대로 쓴다', async () => {
@@ -280,7 +309,6 @@ describe('saveFiveSecondRecord — 새 기록', () => {
       tables: { visits: [NEW_ROW] },
       rpc: {
         create_visit: okEnvelope({ visit_id: 'v2' }),
-        upsert_my_visit_entry: okEnvelope({ visit_id: 'v2' }),
       },
       placeSearchAdapter: { getPlace: async () => ({ id: 'kakao-1', name: '성수동 블루보틀' }) },
     });
@@ -290,12 +318,35 @@ describe('saveFiveSecondRecord — 새 기록', () => {
     expect(lastRpcArgs(client, 'create_visit').p_request_key).toBe('screen-entry-key');
   });
 
+  it('같은 생성 의도를 재시도하면 새 키를 만들지 않고 각 시도에 같은 키를 전달한다', async () => {
+    let requestKeyGenerationCount = 0;
+    const { client, visits } = build({
+      newRequestKey: () => `generated-${++requestKeyGenerationCount}`,
+      tables: { visits: [NEW_ROW] },
+      rpc: { create_visit: okEnvelope({ visit_id: 'v2' }, true) },
+    });
+    const input = {
+      place: { id: 'kakao-1', name: '성수동 블루보틀', provider: 'kakao' },
+      date: '2026-05-03T10:14:00Z',
+      requestKey: 'same-visit-key',
+    };
+
+    await visits.saveFiveSecondRecord(input);
+    await visits.saveFiveSecondRecord(input);
+
+    expect(client.calls.rpc.map((call) => call.args.p_request_key)).toEqual([
+      'same-visit-key',
+      'same-visit-key',
+    ]);
+    expect(rpcNames(client)).toEqual(['create_visit', 'create_visit']);
+    expect(requestKeyGenerationCount).toBe(0);
+  });
+
   it('날짜를 주지 않으면 주입된 현재 시각을 쓴다', async () => {
     const { client, visits } = build({
       tables: { visits: [NEW_ROW] },
       rpc: {
         create_visit: okEnvelope({ visit_id: 'v2' }),
-        upsert_my_visit_entry: okEnvelope({ visit_id: 'v2' }),
       },
       placeSearchAdapter: { getPlace: async () => ({ id: 'kakao-1', name: '성수동 블루보틀' }) },
     });
@@ -316,22 +367,29 @@ describe('saveFiveSecondRecord — 새 기록', () => {
 
     expect(rpcNames(client)).toEqual(['create_visit']);
     expect(record.entries).toEqual([]);
+    expect(record).toMatchObject({ pending: true, flower: null, tags: [], photos: [] });
   });
 
-  it('상대 한 줄을 함께 만들지 않는다', async () => {
+  it('새 기록 입력에 한 줄·별점·꽃갈피·태그·사진이 섞여도 공유 빈 기록만 만든다', async () => {
     const { client, visits } = build({
       tables: { visits: [NEW_ROW] },
-      rpc: {
-        create_visit: okEnvelope({ visit_id: 'v2' }),
-        upsert_my_visit_entry: okEnvelope({ visit_id: 'v2' }),
-      },
-      placeSearchAdapter: { getPlace: async () => ({ id: 'kakao-1', name: '성수동 블루보틀' }) },
+      rpc: { create_visit: okEnvelope({ visit_id: 'v2' }) },
     });
 
-    const record = await visits.saveFiveSecondRecord({ placeId: 'kakao-1', text: '내 한 줄', rating: 3 });
+    const record = await visits.saveFiveSecondRecord({
+      place: { id: 'kakao-1', name: '성수동 블루보틀', provider: 'kakao' },
+      text: '내 한 줄',
+      rating: 3,
+      flower: 'rose',
+      tags: ['# 데이트'],
+      photos: [{ path: 'do-not-send.webp' }],
+    });
 
-    expect(record.entries.filter((entry) => entry.memberId === 'partner')).toEqual([]);
-    expect(client.calls.rpc.filter((call) => call.name === 'upsert_my_visit_entry')).toHaveLength(1);
+    expect(record).toMatchObject({ pending: true, flower: null, entries: [], tags: [], photos: [] });
+    expect(rpcNames(client)).toEqual(['create_visit']);
+    expect(lastRpcArgs(client, 'create_visit')).not.toHaveProperty('p_flower');
+    expect(lastRpcArgs(client, 'create_visit')).not.toHaveProperty('p_tags');
+    expect(lastRpcArgs(client, 'create_visit')).not.toHaveProperty('p_photos');
   });
 
   it('장소를 직접 넘기면 검색 어댑터를 부르지 않는다', async () => {
@@ -417,6 +475,7 @@ describe('setRecordFlower', () => {
 
     expect(client.calls.rpc).toEqual([]);
     expect(record.entries).toEqual([]);
+    expect(record.pending).toBe(true);
   });
 
   it('RLS가 막으면 0행이므로 not_found다', async () => {
@@ -474,6 +533,7 @@ describe('updateRecord', () => {
 
     expect(lastRpcArgs(client, 'upsert_my_visit_entry').p_text).toBeNull();
     expect(record.entries).toEqual([]);
+    expect(record.pending).toBe(true);
   });
 
   it('별점만 고칠 때 기존 한 줄을 지우지 않는다', async () => {

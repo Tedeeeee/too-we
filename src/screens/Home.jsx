@@ -17,23 +17,29 @@ const GROUP_GAP = 24; // 월 그룹 사이
 /** 홈(main) — 기록 카드 캐러셀 + 월별 기록 */
 export default function Home() {
   const navigate = useNavigate();
-  const { couple, records } = useApp();
+  const app = useApp();
+  const couple = {
+    me: app.couple?.me ?? {},
+    partner: app.couple?.partner ?? {},
+  };
+  const records = app.records;
   const [carouselIdx, setCarouselIdx] = useState(0);
+  const safeRecords = Array.isArray(records) ? records : [];
 
   // 캐러셀: 내 한 줄이 아직 없는(진행 중) 기록 카드들 + 마지막 빈 카드
   const pendingRecords = useMemo(
-    () => records.filter((r) => !r.entries.some((e) => e.memberId === 'me')),
-    [records],
+    () => safeRecords.filter((record) => record?.pending === true),
+    [safeRecords],
   );
   const dotCount = pendingRecords.length + 1;
 
   // 월별 기록: 완성된 기록을 최신 달 기준으로 묶는다
   const completeRecords = useMemo(
     () =>
-      records
-        .filter((r) => r.entries.some((e) => e.memberId === 'me'))
+      safeRecords
+        .filter((record) => record?.pending === false)
         .sort((a, b) => new Date(b.date) - new Date(a.date)),
-    [records],
+    [safeRecords],
   );
   /**
    * 월별 그룹. completeRecords가 최신순이라 그룹도 최신순으로 나온다.
@@ -97,7 +103,7 @@ export default function Home() {
           style={{
             position: 'absolute',
             inset: 0,
-            background: couple.me.color,
+            background: couple.me.color ?? palette.beige,
             WebkitMaskImage: `url("${uiSvg.profile}")`,
             maskImage: `url("${uiSvg.profile}")`,
             WebkitMaskRepeat: 'no-repeat',
@@ -134,7 +140,7 @@ export default function Home() {
           style={{
             position: 'absolute',
             inset: 0,
-            background: couple.partner.color,
+            background: couple.partner.color ?? palette.beige,
             WebkitMaskImage: `url("${uiSvg.profile}")`,
             maskImage: `url("${uiSvg.profile}")`,
             WebkitMaskRepeat: 'no-repeat',
@@ -245,7 +251,7 @@ export default function Home() {
                 {rec.placeName}
               </div>
               <div style={{ position: 'absolute', left: 43, top: 100, fontFamily: fonts.hand, fontSize: 24, color: palette.textMuted }}>
-                오늘의 꽃갈피를 남겨주세요
+                오늘의 한 줄을 남겨주세요
               </div>
               <img
                 src={etcSvg.flowerBlank}
@@ -284,22 +290,20 @@ export default function Home() {
                   alt=""
                   style={{ display: 'block', filter: 'invert(1)', pointerEvents: 'none' }}
                 />
-                꽃갈피를 남겨주세요
+                한 줄을 남겨주세요
               </button>
             </div>
           );
         })}
-        {/* 빈 카드 — 탭하면 지도(새 기록) */}
+        {/* 빈 카드는 시각적 안내만 제공하며 새 기록은 아래 + 버튼에서 시작한다. */}
         <div
           data-pending-card
-          onClick={() => navigate('/map')}
           style={{
             position: 'relative',
             width: 348,
             height: 228,
             flexShrink: 0,
             scrollSnapAlign: 'start',
-            cursor: 'pointer',
           }}
         >
           <img
@@ -361,7 +365,7 @@ export default function Home() {
               color: palette.textMuted,
             }}
           >
-            탭하면 새 기록을 시작해요
+            아래 + 버튼으로 새 기록을 시작해요
           </div>
         </div>
       </div>
@@ -462,7 +466,11 @@ export default function Home() {
       )}
 
       {/* 하단 네비 — 초록 워시는 BottomNav 컨테이너가 직접 깐다(시안 구조) */}
-      <BottomNav onMap={() => navigate('/map')} onHome={() => navigate('/')} />
+      <BottomNav
+        onAdd={() => navigate('/map', { state: { intent: 'new-record' } })}
+        onMap={() => navigate('/map')}
+        onHome={() => navigate('/')}
+      />
     </Screen>
   );
 }
