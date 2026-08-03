@@ -7,7 +7,7 @@ const COUPLE_COLUMNS =
 
 const validationError = (cause) => new AppError(ERROR_CODES.validation, { cause });
 
-export function createCouplesRepository({ getClient, session, requestKey }) {
+export function createCouplesRepository({ getClient, session, requestKey, now = () => new Date() }) {
   const getCouple = async () => {
     const userId = await session.ensureUserId();
     const client = getClient();
@@ -26,7 +26,7 @@ export function createCouplesRepository({ getClient, session, requestKey }) {
         .maybeSingle(),
     );
 
-    return mapCouple({ userId, couple, profiles, invite });
+    return mapCouple({ userId, couple, profiles, invite, now: now() });
   };
 
   return {
@@ -37,6 +37,14 @@ export function createCouplesRepository({ getClient, session, requestKey }) {
       await callRpc(getClient(), 'create_couple', {
         p_display_name: options.displayName ?? null,
         p_started_on: options.startedOn ?? null,
+        p_request_key: requestKey(options.requestKey),
+      });
+      return getCouple();
+    },
+
+    async reissueCoupleInvite(options = {}) {
+      await session.ensureUserId();
+      await callRpc(getClient(), 'reissue_couple_invite', {
         p_request_key: requestKey(options.requestKey),
       });
       return getCouple();

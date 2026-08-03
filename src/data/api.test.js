@@ -94,6 +94,40 @@ describe('data API facade', () => {
     expect(secondClient.calls.auth).toEqual(['getSession']);
   });
 
+  it('만료된 초대를 재발급하는 최소 facade action을 제공한다', async () => {
+    const client = createFakeSupabaseClient({
+      userId: ME,
+      tables: {
+        couples: [{
+          id: 'c1',
+          status: 'active',
+          started_on: null,
+          connected_at: null,
+          created_at: '2026-05-01T00:00:00Z',
+          couple_members: [{ user_id: ME, slot: 1, left_at: null }],
+        }],
+        profiles: [{ id: ME, display_name: '지은' }],
+        couple_invites: [{
+          code: '731904',
+          status: 'active',
+          expires_at: '2099-05-05T00:00:00Z',
+        }],
+      },
+      rpc: {
+        reissue_couple_invite: okEnvelope({ couple_id: 'c1' }),
+      },
+    });
+    __setSupabaseClient(client);
+
+    await expect(
+      api.reissueCoupleInvite({ requestKey: 'api-reissue-key' }),
+    ).resolves.toMatchObject({ inviteCode: '731904' });
+    expect(client.calls.rpc).toEqual([{
+      name: 'reissue_couple_invite',
+      args: { p_request_key: 'api-reissue-key' },
+    }]);
+  });
+
   it('기존 Promise API가 주입된 Supabase 저장소의 빈 기록 목록을 그대로 돌려준다', async () => {
     const client = createFakeSupabaseClient({ userId: ME, tables: { visits: [] } });
     __setSupabaseClient(client);
