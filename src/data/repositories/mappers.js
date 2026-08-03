@@ -104,8 +104,11 @@ export function mapVisit(row, userId) {
     .map((photo) => ({
       id: photo.id,
       ordinal: photo.ordinal,
+      order: photo.ordinal,
       bucket: photo.storage_bucket,
       path: photo.storage_path,
+      uploaderId: photo.uploader_id,
+      ownedByMe: photo.uploader_id === userId,
     }));
 
   return {
@@ -128,6 +131,7 @@ export function mapVisit(row, userId) {
       category: row.place_category ?? null,
       address: row.place_address ?? null,
       roadAddress: row.place_road_address ?? null,
+      phone: row.place_phone ?? null,
       url: row.place_url ?? null,
       lat: row.place_lat ?? null,
       lng: row.place_lng ?? null,

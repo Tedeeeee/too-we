@@ -43,6 +43,7 @@ const visitRow = (over = {}) => ({
   place_category: '카페',
   place_address: '서울 성동구 연무장길 7',
   place_road_address: null,
+  place_phone: '02-000-0000',
   place_url: null,
   place_lat: 37.5443,
   place_lng: 127.0557,
@@ -214,6 +215,7 @@ describe('mapVisit — 화면 기록 셰이프', () => {
       category: '카페',
       address: '서울 성동구 연무장길 7',
       roadAddress: null,
+      phone: '02-000-0000',
       url: null,
       lat: 37.5443,
       lng: 127.0557,
@@ -247,17 +249,67 @@ describe('mapVisit — 화면 기록 셰이프', () => {
     const record = mapVisit(
       visitRow({
         visit_photos: [
-          { id: 'p2', ordinal: 2, storage_bucket: 'visit-photos', storage_path: 'c1/v1/b.webp' },
-          { id: 'p1', ordinal: 1, storage_bucket: 'visit-photos', storage_path: 'c1/v1/a.webp' },
+          {
+            id: 'p2',
+            uploader_id: PARTNER,
+            ordinal: 2,
+            storage_bucket: 'visit-photos',
+            storage_path: 'c1/v1/b.webp',
+          },
+          {
+            id: 'p1',
+            uploader_id: ME,
+            ordinal: 1,
+            storage_bucket: 'visit-photos',
+            storage_path: 'c1/v1/a.webp',
+          },
         ],
       }),
       ME,
     );
 
     expect(record.photos).toEqual([
-      { id: 'p1', ordinal: 1, bucket: 'visit-photos', path: 'c1/v1/a.webp' },
-      { id: 'p2', ordinal: 2, bucket: 'visit-photos', path: 'c1/v1/b.webp' },
+      {
+        id: 'p1',
+        ordinal: 1,
+        order: 1,
+        bucket: 'visit-photos',
+        path: 'c1/v1/a.webp',
+        uploaderId: ME,
+        ownedByMe: true,
+      },
+      {
+        id: 'p2',
+        ordinal: 2,
+        order: 2,
+        bucket: 'visit-photos',
+        path: 'c1/v1/b.webp',
+        uploaderId: PARTNER,
+        ownedByMe: false,
+      },
     ]);
+  });
+
+  it('사진 소유권 투영은 같은 방문을 보는 사용자에 따라 바뀌지만 기존 pending 계산은 바뀌지 않는다', () => {
+    const row = visitRow({
+      visit_entries: [{ author_id: ME, note: null, rating: 5 }],
+      visit_photos: [{
+        id: 'p1',
+        uploader_id: ME,
+        ordinal: 1,
+        storage_bucket: 'visit-photos',
+        storage_path: 'c1/v1/a.webp',
+      }],
+    });
+
+    expect(mapVisit(row, ME)).toMatchObject({
+      pending: true,
+      photos: [{ uploaderId: ME, ownedByMe: true, order: 1 }],
+    });
+    expect(mapVisit(row, PARTNER)).toMatchObject({
+      pending: true,
+      photos: [{ uploaderId: ME, ownedByMe: false, order: 1 }],
+    });
   });
 
   it('내 한 줄을 먼저, 상대 한 줄을 뒤에 놓는다', () => {
@@ -288,6 +340,30 @@ describe('mapVisit — 화면 기록 셰이프', () => {
 
     expect(record.entries.find((e) => e.memberId === 'partner').readOnly).toBe(true);
     expect(record.entries.find((e) => e.memberId === 'me').readOnly).toBe(false);
+  });
+
+  it('상대의 공백을 제거한 한 줄·별점을 함께 보여주되 반드시 읽기 전용으로 낸다', () => {
+    const record = mapVisit(
+      visitRow({
+        visit_entries: [
+          { author_id: ME, note: null, rating: 3 },
+          { author_id: PARTNER, note: '  상대 한 줄  ', rating: 5 },
+        ],
+      }),
+      ME,
+    );
+
+    expect(record.pending).toBe(true);
+    expect(record.rating).toBe(3);
+    expect(record.entries).toEqual([
+      {
+        memberId: 'partner',
+        authorUserId: PARTNER,
+        text: '상대 한 줄',
+        rating: 5,
+        readOnly: true,
+      },
+    ]);
   });
 
   it('한 줄이 비면(null) 그 사용자의 entry를 내보내지 않는다 — 대기 상태', () => {

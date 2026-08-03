@@ -17,25 +17,28 @@ import { seasonFromDate } from '@/data/format';
 export default function PlaceDetailScreen() {
   const navigate = useNavigate();
   const { recordId } = useParams();
-  const { couple, ready } = useApp();
+  const { couple, ready, retryBootstrap } = useApp();
   const record = useRecord(recordId);
   const [photoIdx, setPhotoIdx] = useState(0);
 
   if (ready && !record) return <Navigate to="/" replace />;
   if (!record) return null;
 
-  const photoCount = record.photos?.length ?? 0;
+  const photos = (Array.isArray(record.photos) ? record.photos : [])
+    .slice()
+    .sort((a, b) => Number(a?.order ?? a?.ordinal ?? 0) - Number(b?.order ?? b?.ordinal ?? 0));
+  const photoCount = photos.length;
   // 시안에 오른쪽 화살표가 하나뿐이라 순환으로 전체를 돌 수 있게 한다
   const nextPhoto = photoCount > 1 ? () => setPhotoIdx((i) => (i + 1) % photoCount) : undefined;
 
   return (
     <PlaceDetail
-      record={record}
+      record={{ ...record, photos }}
       couple={couple}
       season={seasonFromDate(record.date)}
       photoIndex={Math.min(photoIdx, Math.max(photoCount - 1, 0))}
-      photoCount={photoCount}
       onNextPhoto={nextPhoto}
+      onRetryPhotos={retryBootstrap}
       onBack={() => navigate(-1)}
       onOpenPick={() => navigate('/pick', { state: { recordId } })}
       onOpenEdit={() => navigate(`/place/${recordId}/edit`)}

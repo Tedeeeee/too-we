@@ -31,6 +31,25 @@ const locationErrorMessage = (error) => {
   return '현재 위치를 확인할 수 없어요. 키워드로 검색해 주세요.';
 };
 
+const clonePlace = (place) => (
+  place && typeof place === 'object' ? { ...place } : place
+);
+
+const freezeEditDraft = (draft, placeOverride) => {
+  if (!draft || typeof draft !== 'object') return null;
+  const place = clonePlace(placeOverride || draft.place);
+  const tags = Object.freeze(Array.isArray(draft.tags) ? draft.tags.slice() : []);
+  return Object.freeze({
+    place: place && typeof place === 'object' ? Object.freeze(place) : place,
+    date: draft.date,
+    time: draft.time,
+    flower: draft.flower ?? null,
+    tags,
+    text: draft.text,
+    rating: draft.rating,
+  });
+};
+
 /** 지도(장소 선택) — 키워드 검색 결과를 지도와 연결하고 진입 intent를 지킨다. */
 export default function MapSelect() {
   const navigate = useNavigate();
@@ -49,6 +68,11 @@ export default function MapSelect() {
   const geolocationRequestedRef = useRef(false);
 
   const isNewRecordIntent = routeLocation.state?.intent === 'new-record';
+  const editRecordId = routeLocation.state?.intent === 'edit-record-place'
+    && typeof routeLocation.state?.recordId === 'string'
+    ? routeLocation.state.recordId
+    : null;
+  const editDraft = editRecordId ? freezeEditDraft(routeLocation.state?.draft) : null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -167,9 +191,19 @@ export default function MapSelect() {
   const selectPlace = (place) => {
     if (!place) return;
     setSelectedPlaceId(place.id);
+    const snapshot = Object.freeze({ ...place });
+    if (editRecordId) {
+      const returnedDraft = freezeEditDraft(editDraft, snapshot);
+      navigate(`/place/${editRecordId}/edit`, {
+        replace: true,
+        state: returnedDraft
+          ? Object.freeze({ draft: returnedDraft })
+          : Object.freeze({ place: snapshot }),
+      });
+      return;
+    }
     if (!isNewRecordIntent) return;
 
-    const snapshot = Object.freeze({ ...place });
     navigate('/record', {
       state: Object.freeze({
         place: snapshot,
@@ -204,7 +238,16 @@ export default function MapSelect() {
         width={402}
         height={560}
       />
-      <BackButton left={16} top={68} />
+      <BackButton
+        left={16}
+        top={68}
+        onClick={editRecordId && editDraft
+          ? () => navigate(`/place/${editRecordId}/edit`, {
+              replace: true,
+              state: Object.freeze({ draft: freezeEditDraft(editDraft) }),
+            })
+          : undefined}
+      />
 
       <form
         onSubmit={submitSearch}

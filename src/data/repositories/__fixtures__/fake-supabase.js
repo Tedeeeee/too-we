@@ -164,6 +164,7 @@ const asRows = (value) => {
  *   signInResult?: () => object,
  *   tables?: Record<string, unknown>,
  *   rpc?: Record<string, unknown>,
+ *   storage?: Record<string, Record<string, unknown>>,
  * }} [config]
  */
 export function createFakeSupabaseClient(config = {}) {
@@ -175,9 +176,10 @@ export function createFakeSupabaseClient(config = {}) {
     signInResult = null,
     tables = {},
     rpc = {},
+    storage = {},
   } = config;
 
-  const calls = { queries: [], rpc: [], auth: [] };
+  const calls = { queries: [], rpc: [], auth: [], storage: [] };
 
   const respond = (query) => {
     calls.queries.push(query);
@@ -222,6 +224,40 @@ export function createFakeSupabaseClient(config = {}) {
         return raw;
       }
       return { data: raw, error: null };
+    },
+
+    storage: {
+      from(bucket) {
+        const bucketHandlers = storage[bucket];
+        if (bucketHandlers === undefined) {
+          throw new Error(`fake supabase: no storage handler for bucket "${bucket}"`);
+        }
+
+        const invoke = async (method, args) => {
+          calls.storage.push({ bucket, method, ...args });
+          const handler = bucketHandlers[method];
+          if (handler === undefined) {
+            throw new Error(`fake supabase: no storage handler for method "${method}"`);
+          }
+          const raw = typeof handler === 'function' ? await handler(args) : handler;
+          if (raw && typeof raw === 'object' && (Object.hasOwn(raw, 'data') || Object.hasOwn(raw, 'error'))) {
+            return raw;
+          }
+          return { data: raw ?? null, error: null };
+        };
+
+        return {
+          upload(path, body, options) {
+            return invoke('upload', { path, body, options });
+          },
+          createSignedUrl(path, expiresIn) {
+            return invoke('createSignedUrl', { path, expiresIn });
+          },
+          remove(paths) {
+            return invoke('remove', { paths });
+          },
+        };
+      },
     },
 
     auth: {

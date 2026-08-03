@@ -23,6 +23,7 @@ const visitRow = (over = {}) => ({
   place_category: null,
   place_address: null,
   place_road_address: null,
+  place_phone: null,
   place_url: null,
   place_lat: null,
   place_lng: null,
@@ -300,5 +301,146 @@ describe('data API facade', () => {
     await expect(api.saveFiveSecondRecord(null)).rejects.toMatchObject({
       code: ERROR_CODES.validation,
     });
+  });
+
+  it('facade 경계에서도 상대 entry 쓰기 shape을 받지 않는다', async () => {
+    const client = createFakeSupabaseClient({ userId: ME, tables: {}, rpc: {} });
+    __setSupabaseClient(client);
+    const input = Object.freeze({
+      recordId: 'v1',
+      text: '내 한 줄',
+      entries: Object.freeze([{ memberId: 'partner', text: '상대 한 줄', rating: 5 }]),
+    });
+
+    await expect(api.saveFiveSecondRecord(input)).rejects.toMatchObject({
+      code: ERROR_CODES.validation,
+      retryable: false,
+    });
+
+    expect(client.calls.auth).toEqual([]);
+    expect(client.calls.rpc).toEqual([]);
+    expect(client.calls.queries).toEqual([]);
+  });
+
+  it('facade 모델은 내 rating-only로 pending을 완료하지 않고 상대 값을 읽기 전용으로 보여준다', async () => {
+    const partner = '22222222-2222-4222-8222-222222222222';
+    const client = createFakeSupabaseClient({
+      userId: ME,
+      tables: {
+        visits: [visitRow({
+          visit_entries: [
+            { author_id: ME, note: null, rating: 3 },
+            { author_id: partner, note: '  상대 한 줄  ', rating: 5 },
+          ],
+        })],
+      },
+    });
+    __setSupabaseClient(client);
+
+    const [record] = await api.getRecords();
+
+    expect(record).toMatchObject({ pending: true, rating: 3 });
+    expect(record.entries).toEqual([
+      expect.objectContaining({
+        memberId: 'partner',
+        text: '상대 한 줄',
+        rating: 5,
+        readOnly: true,
+      }),
+    ]);
+  });
+
+  it('facade updateRecord로 공동 장소를 변경하고 최신 서버 장소를 받는다', async () => {
+    const updatedRow = visitRow({
+      place_provider: 'manual',
+      place_provider_id: null,
+      place_name: '새 장소',
+      place_phone: '02-123-4567',
+    });
+    const client = createFakeSupabaseClient({
+      userId: ME,
+      tables: {
+        visits: (query) => (query.op === 'update' ? [{ id: 'v1' }] : [updatedRow]),
+      },
+    });
+    __setSupabaseClient(client);
+    const patch = Object.freeze({
+      place: Object.freeze({ name: '  새 장소  ', phone: ' 02-123-4567 ' }),
+    });
+
+    const record = await api.updateRecord('v1', patch);
+
+    expect(record.place).toMatchObject({
+      provider: 'manual',
+      providerId: null,
+      name: '새 장소',
+      phone: '02-123-4567',
+    });
+    const update = queriesFor(client, 'visits').find((query) => query.op === 'update');
+    expect(update.payload).toMatchObject({
+      place_provider: 'manual',
+      place_provider_id: null,
+      place_name: '새 장소',
+      place_phone: '02-123-4567',
+      place_snapshot: { provider: 'manual', name: '새 장소', phone: '02-123-4567' },
+    });
+    expect(client.calls.rpc).toEqual([]);
+  });
+
+  it('facade가 사진 입력을 바꾸지 않고 private storage 업로드 상태를 파일별로 돌려준다', async () => {
+    const source = new File(['image'], 'memory.jpg', { type: 'image/jpeg' });
+    const files = Object.freeze([source]);
+    const client = createFakeSupabaseClient({
+      userId: ME,
+      storage: {
+        'visit-photos': {
+          upload: ({ path }) => ({ path }),
+        },
+      },
+      rpc: {
+        register_visit_photo: okEnvelope({ photo_id: 'photo-1', ordinal: 1 }),
+      },
+    });
+    __setSupabaseClient(client);
+
+    const [result] = await api.uploadVisitPhotos({ id: 'v1', coupleId: 'c1' }, files);
+
+    expect(files).toEqual([source]);
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      file: source,
+      objectUploaded: true,
+      photo: { id: 'photo-1', ownedByMe: true, order: 1 },
+    });
+    const args = lastRpcArgs(client, 'register_visit_photo');
+    expect(args.p_storage_path).toMatch(/^c1\/v1\/[^/]+\.jpg$/);
+    expect(args.p_request_key).toEqual(expect.any(String));
+    expect(args.p_metadata).toEqual({
+      content_type: 'image/jpeg',
+      byte_size: source.size,
+      width: null,
+      height: null,
+    });
+    expect(client.calls.storage[0].options).toMatchObject({ upsert: false });
+  });
+
+  it('facade에서 상대 사진 삭제 요청은 raw backend 호출 없이 안전한 실패 상태다', async () => {
+    const client = createFakeSupabaseClient({ userId: ME });
+    __setSupabaseClient(client);
+
+    const result = await api.deleteVisitPhoto({
+      id: 'partner-photo',
+      bucket: 'visit-photos',
+      path: 'c1/v1/partner.webp',
+      uploaderId: 'partner',
+      ownedByMe: false,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      error: { code: ERROR_CODES.forbidden, retryable: false },
+    });
+    expect(client.calls.storage).toEqual([]);
+    expect(client.calls.queries).toEqual([]);
   });
 });
