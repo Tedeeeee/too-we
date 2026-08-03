@@ -1,0 +1,33 @@
+#!/bin/sh
+#
+# 승인된 Codex fallback 커밋 뒤 grant를 소진한다.
+#
+# pre-commit이 grant를 staged tree에 예약해 두므로, 그 tree가 실제 커밋된 경우에만
+# 소진한다. 예약과 다른 tree가 커밋됐으면 아무것도 하지 않는다.
+#
+# 이 훅은 어떤 경우에도 커밋을 실패시키지 않는다 — 커밋은 이미 만들어졌고, 소진 실패는
+# grant를 활성 상태로 남겨 다음 검증이 막는 방향으로 작동한다.
+
+if [ -z "$ORCA_TERMINAL_HANDLE" ]; then
+  exit 0
+fi
+
+if [ -z "$CODEX_THREAD_ID" ] && [ -z "$CODEX_HOME" ] && [ -z "$CODEX_SESSION_ID" ]; then
+  exit 0
+fi
+
+primary=$(git worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')
+if [ -z "$primary" ]; then
+  exit 0
+fi
+
+grant_cli="$primary/scripts/agent-routing-grant.mjs"
+if [ ! -f "$grant_cli" ]; then
+  exit 0
+fi
+
+tree=$(git rev-parse 'HEAD^{tree}' 2>/dev/null) || exit 0
+commit=$(git rev-parse HEAD 2>/dev/null) || exit 0
+
+node "$grant_cli" consume --terminal "$ORCA_TERMINAL_HANDLE" --tree "$tree" --commit "$commit" >/dev/null 2>&1 || true
+exit 0

@@ -1,0 +1,7 @@
+# 라우팅 훅만 줄바꿈을 고정한다. 다른 파일의 정규화 동작은 바꾸지 않는다.
+#
+# 훅은 Git Bash와 POSIX sh가 실행한다. core.autocrlf=true인 환경(이 프로젝트의 Windows
+# 개발 환경)에서 CRLF로 체크아웃되면, CR을 토큰에 포함시키는 셸에서는 `verifier=...`에
+# 붙은 CR 때문에 `[ ! -f "$verifier" ]`가 참이 되어 훅이 **조용히 통과한다**. 가드가
+# 소리 없이 열리는 것이 최악이므로 LF를 강제한다.
+.githooks/* text eol=lf

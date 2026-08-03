@@ -112,6 +112,8 @@ describe('classifyPath', () => {
     expect(classifyPath('scripts/agent-routing-grant.mjs')).toBe('implementation');
     expect(classifyPath('scripts/verify-agent-routing.mjs')).toBe('implementation');
     expect(classifyPath('scripts/install-agent-routing-hooks.mjs')).toBe('implementation');
+    // 훅 줄바꿈을 고정하는 파일이다. 여기가 열리면 훅을 CRLF로 되돌려 가드를 조용히 무력화할 수 있다.
+    expect(classifyPath('.gitattributes')).toBe('implementation');
   });
 
   it('treats application, service, and configuration paths as implementation work', () => {
