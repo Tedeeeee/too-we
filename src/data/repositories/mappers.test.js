@@ -13,6 +13,7 @@ import {
 
 const ME = '11111111-1111-4111-8111-111111111111';
 const PARTNER = '22222222-2222-4222-8222-222222222222';
+const NOW = new Date('2026-05-03T12:00:00Z');
 
 const coupleRow = (over = {}) => ({
   id: 'c1',
@@ -138,6 +139,7 @@ describe('mapCouple — auth.uid로 me/partner 별칭을 정한다', () => {
       couple: coupleRow(),
       profiles,
       invite: { code: '482195', status: 'active', expires_at: '2026-05-04T00:00:00Z' },
+      now: NOW,
     });
     const consumed = mapCouple({
       userId: ME,
@@ -146,8 +148,34 @@ describe('mapCouple — auth.uid로 me/partner 별칭을 정한다', () => {
       invite: { code: '482195', status: 'consumed' },
     });
 
-    expect(active.inviteCode).toBe('482195');
-    expect(consumed.inviteCode).toBe('');
+    expect(active).toMatchObject({
+      inviteCode: '482195',
+      inviteExpiresAt: '2026-05-04T00:00:00.000Z',
+    });
+    expect(consumed).toMatchObject({ inviteCode: '', inviteExpiresAt: null });
+  });
+
+  it('status가 active여도 시간이 지난 코드는 공유하지 않고 만료 시각만 안전하게 투영한다', () => {
+    const expired = mapCouple({
+      userId: ME,
+      couple: coupleRow(),
+      profiles,
+      invite: { code: '482195', status: 'active', expires_at: '2026-05-03T11:59:59Z' },
+      now: NOW,
+    });
+    const malformed = mapCouple({
+      userId: ME,
+      couple: coupleRow(),
+      profiles,
+      invite: { code: '999999', status: 'active', expires_at: 'not-a-date' },
+      now: NOW,
+    });
+
+    expect(expired).toMatchObject({
+      inviteCode: '',
+      inviteExpiresAt: '2026-05-03T11:59:59.000Z',
+    });
+    expect(malformed).toMatchObject({ inviteCode: '', inviteExpiresAt: null });
   });
 
   it('started_on이 비면 connected_at → created_at 순으로 떨어진다', () => {

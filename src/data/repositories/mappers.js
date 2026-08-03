@@ -7,6 +7,11 @@ export const EMPTY_SETTINGS = Object.freeze({ recordAlert: '' });
 
 const cleanString = (value) => (typeof value === 'string' ? value.trim() : '');
 
+const isoTimestamp = (value) => {
+  const timestamp = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+};
+
 const memberView = ({ alias, userId, name, slot }) => ({
   id: alias,
   userId: userId ?? null,
@@ -15,7 +20,7 @@ const memberView = ({ alias, userId, name, slot }) => ({
   color: SLOT_COLORS[slot],
 });
 
-export function mapCouple({ userId, couple, profiles = [], invite }) {
+export function mapCouple({ userId, couple, profiles = [], invite, now = new Date() }) {
   const nameById = new Map(profiles.map((profile) => [profile.id, profile.display_name ?? '']));
   const members = (couple?.couple_members ?? [])
     .filter((member) => member.left_at == null)
@@ -26,12 +31,19 @@ export function mapCouple({ userId, couple, profiles = [], invite }) {
   const partnerSlot = theirs?.slot ?? (mySlot === 1 ? 2 : 1);
   const myName = nameById.get(userId) ?? '';
   const partnerName = theirs ? (nameById.get(theirs.user_id) ?? '') : '';
+  const inviteExpiresAt = invite?.status === 'active' ? isoTimestamp(invite.expires_at) : null;
+  const nowTimestamp = now instanceof Date ? now.getTime() : Date.parse(now);
+  const inviteIsShareable =
+    Boolean(inviteExpiresAt) &&
+    Number.isFinite(nowTimestamp) &&
+    Date.parse(inviteExpiresAt) > nowTimestamp;
 
   return {
     coupleId: couple?.id ?? null,
     connected: couple?.status === 'active' && Boolean(mine && theirs),
     onboarded: Boolean(couple && myName),
-    inviteCode: invite?.status === 'active' ? (invite.code ?? '') : '',
+    inviteCode: inviteIsShareable ? cleanString(invite.code) : '',
+    inviteExpiresAt,
     startDate: couple?.started_on ?? couple?.connected_at ?? couple?.created_at ?? null,
     me: memberView({ alias: 'me', userId, name: myName, slot: mySlot }),
     partner: memberView({

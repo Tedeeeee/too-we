@@ -31,7 +31,7 @@ export function createRepositories({
 
   return {
     session,
-    couples: createCouplesRepository({ getClient: resolveClient, session, requestKey }),
+    couples: createCouplesRepository({ getClient: resolveClient, session, requestKey, now }),
     visits: createVisitsRepository({
       getClient: resolveClient,
       session,

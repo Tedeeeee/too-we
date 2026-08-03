@@ -13,6 +13,7 @@ const repositories = createRepositories({ getClient: getSupabaseClient });
 
 export const getCouple = (...args) => repositories.couples.getCouple(...args);
 export const createCouple = (...args) => repositories.couples.createCouple(...args);
+export const reissueCoupleInvite = (...args) => repositories.couples.reissueCoupleInvite(...args);
 export const connectWithCode = (...args) => repositories.couples.connectWithCode(...args);
 export const setMyName = (...args) => repositories.couples.setMyName(...args);
 export const completeOnboarding = (...args) => repositories.couples.completeOnboarding(...args);
