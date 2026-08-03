@@ -549,6 +549,19 @@ describe('wishlist places are independent of visits', () => {
   it('carries no visit foreign key', () => {
     expect(tableSql('public.wishlist_places')).not.toMatch(/references\s+public\.visits/i);
   });
+
+  it('keeps the couple and original picker immutable after insert', () => {
+    const trigger = statements().find(
+      (st) =>
+        /create\s+trigger/i.test(st.code) &&
+        /before\s+update\s+on\s+public\.wishlist_places\b/i.test(st.code) &&
+        /guard_immutable_columns/i.test(st.code),
+    );
+    expect(trigger, 'wishlist_places has no immutable identity guard').toBeDefined();
+    expect(trigger.code).toMatch(
+      /guard_immutable_columns\s*\(\s*'couple_id'\s*,\s*'created_by'\s*\)/i,
+    );
+  });
 });
 
 describe('idempotency records', () => {
@@ -1116,6 +1129,7 @@ describe('database scenario tests are present as SQL', () => {
       'disconnect',
       // Regression: an old couple's purge must not touch new-couple state.
       'purge_isolation',
+      'wishlist_identity',
     ]) {
       expect(joined, `no SQL scenario covers ${topic}`).toContain(topic);
     }
