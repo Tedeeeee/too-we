@@ -244,6 +244,39 @@ describe('AppProvider actions', () => {
     expect(appState.records).toEqual(convergedRecords);
   });
 
+  it('기존 기록 수정 쓰기가 실패하면 refresh하지 않고 마지막 목록을 보존한다', async () => {
+    await renderReadyProvider();
+    const networkError = new AppError(ERROR_CODES.network);
+    const patch = Object.freeze({
+      text: '  다시 쓴 한 줄  ',
+      rating: 5,
+      tags: Object.freeze(['# 데이트']),
+    });
+    api.updateRecord.mockRejectedValue(networkError);
+
+    await expect(appState.updateRecord('record-1', patch)).rejects.toBe(networkError);
+
+    expect(api.updateRecord).toHaveBeenCalledWith('record-1', patch);
+    expect(api.getRecords).toHaveBeenCalledTimes(1);
+    expect(appState.records).toEqual(RESTORED_RECORDS);
+  });
+
+  it('기존 기록 수정이 성공한 뒤에만 서버 목록을 다시 불러온다', async () => {
+    await renderReadyProvider();
+    const patch = Object.freeze({ place: Object.freeze({ name: '새 장소' }) });
+    const latestRecords = [{ id: 'record-1', placeName: '새 장소' }];
+    api.updateRecord.mockResolvedValue({ id: 'record-1' });
+    api.getRecords.mockResolvedValue(latestRecords);
+
+    await act(async () => {
+      await appState.updateRecord('record-1', patch);
+    });
+
+    expect(api.updateRecord).toHaveBeenCalledWith('record-1', patch);
+    expect(api.getRecords).toHaveBeenCalledTimes(2);
+    expect(appState.records).toEqual(latestRecords);
+  });
+
   it('기록 저장 뒤 새 목록 조회 실패도 이전 목록을 보존하고 같은 입력·키 재시도로 수렴한다', async () => {
     await renderReadyProvider();
     const networkError = new AppError(ERROR_CODES.network);

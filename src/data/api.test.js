@@ -23,6 +23,7 @@ const visitRow = (over = {}) => ({
   place_category: null,
   place_address: null,
   place_road_address: null,
+  place_phone: null,
   place_url: null,
   place_lat: null,
   place_lng: null,
@@ -300,5 +301,89 @@ describe('data API facade', () => {
     await expect(api.saveFiveSecondRecord(null)).rejects.toMatchObject({
       code: ERROR_CODES.validation,
     });
+  });
+
+  it('facade 경계에서도 상대 entry 쓰기 shape을 받지 않는다', async () => {
+    const client = createFakeSupabaseClient({ userId: ME, tables: {}, rpc: {} });
+    __setSupabaseClient(client);
+    const input = Object.freeze({
+      recordId: 'v1',
+      text: '내 한 줄',
+      entries: Object.freeze([{ memberId: 'partner', text: '상대 한 줄', rating: 5 }]),
+    });
+
+    await expect(api.saveFiveSecondRecord(input)).rejects.toMatchObject({
+      code: ERROR_CODES.validation,
+      retryable: false,
+    });
+
+    expect(client.calls.auth).toEqual([]);
+    expect(client.calls.rpc).toEqual([]);
+    expect(client.calls.queries).toEqual([]);
+  });
+
+  it('facade 모델은 내 rating-only로 pending을 완료하지 않고 상대 값을 읽기 전용으로 보여준다', async () => {
+    const partner = '22222222-2222-4222-8222-222222222222';
+    const client = createFakeSupabaseClient({
+      userId: ME,
+      tables: {
+        visits: [visitRow({
+          visit_entries: [
+            { author_id: ME, note: null, rating: 3 },
+            { author_id: partner, note: '  상대 한 줄  ', rating: 5 },
+          ],
+        })],
+      },
+    });
+    __setSupabaseClient(client);
+
+    const [record] = await api.getRecords();
+
+    expect(record).toMatchObject({ pending: true, rating: 3 });
+    expect(record.entries).toEqual([
+      expect.objectContaining({
+        memberId: 'partner',
+        text: '상대 한 줄',
+        rating: 5,
+        readOnly: true,
+      }),
+    ]);
+  });
+
+  it('facade updateRecord로 공동 장소를 변경하고 최신 서버 장소를 받는다', async () => {
+    const updatedRow = visitRow({
+      place_provider: 'manual',
+      place_provider_id: null,
+      place_name: '새 장소',
+      place_phone: '02-123-4567',
+    });
+    const client = createFakeSupabaseClient({
+      userId: ME,
+      tables: {
+        visits: (query) => (query.op === 'update' ? [{ id: 'v1' }] : [updatedRow]),
+      },
+    });
+    __setSupabaseClient(client);
+    const patch = Object.freeze({
+      place: Object.freeze({ name: '  새 장소  ', phone: ' 02-123-4567 ' }),
+    });
+
+    const record = await api.updateRecord('v1', patch);
+
+    expect(record.place).toMatchObject({
+      provider: 'manual',
+      providerId: null,
+      name: '새 장소',
+      phone: '02-123-4567',
+    });
+    const update = queriesFor(client, 'visits').find((query) => query.op === 'update');
+    expect(update.payload).toMatchObject({
+      place_provider: 'manual',
+      place_provider_id: null,
+      place_name: '새 장소',
+      place_phone: '02-123-4567',
+      place_snapshot: { provider: 'manual', name: '새 장소', phone: '02-123-4567' },
+    });
+    expect(client.calls.rpc).toEqual([]);
   });
 });
