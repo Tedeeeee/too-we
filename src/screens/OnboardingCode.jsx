@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { palette, fonts, gradients } from '@/styles/tokens';
 import { onboardingSvg } from '@assets/svg';
@@ -6,16 +6,60 @@ import Screen from '@/components/Screen';
 import PrimaryButton from '@/components/PrimaryButton';
 import HandDrawnLine from '@/components/HandDrawnLine';
 import { useApp } from '@/data/store';
-import { DEMO_INVITER } from '@/data/fixtures';
+import { onboardingError } from './onboarding-errors';
 
 /** onboarding2 — 초대 코드 입력 (6자리) */
 export default function OnboardingCode() {
   const navigate = useNavigate();
-  const { connectWithCode } = useApp();
+  const { couple, connectWithCode } = useApp();
   const [code, setCode] = useState('');
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState(null);
   const inputRef = useRef(null);
+  const inFlightRef = useRef(false);
 
   const cur = Math.min(code.length, 5);
+  const canSubmit = code.length === 6;
+
+  useEffect(() => {
+    if (!couple?.coupleId) return;
+
+    if (couple.connected && couple.onboarded) {
+      navigate('/', { replace: true });
+      return;
+    }
+
+    if (couple.me?.name && !couple.connected) {
+      navigate('/onboarding/share', { replace: true });
+      return;
+    }
+
+    navigate('/onboarding/name', {
+      replace: true,
+      state: { invited: Boolean(couple.connected && !couple.inviteCode) },
+    });
+  }, [couple, navigate]);
+
+  const handleConnect = async () => {
+    if (!canSubmit) {
+      inputRef.current?.focus();
+      return;
+    }
+    if (inFlightRef.current) return;
+
+    inFlightRef.current = true;
+    setPending(true);
+    setError(null);
+    try {
+      await connectWithCode(code);
+      navigate('/onboarding/name', { state: { invited: true } });
+    } catch (nextError) {
+      setError(onboardingError(nextError, 'join'));
+    } finally {
+      inFlightRef.current = false;
+      setPending(false);
+    }
+  };
 
   return (
     <Screen bg={gradients.onboarding}>
@@ -54,7 +98,7 @@ export default function OnboardingCode() {
           color: palette.textMuted,
         }}
       >
-        {DEMO_INVITER}님이 당신을 기다리고 있어요
+        초대한 사람이 당신을 기다리고 있어요
       </div>
       <div
         style={{
@@ -119,10 +163,18 @@ export default function OnboardingCode() {
       <input
         ref={inputRef}
         value={code}
-        onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+        onChange={(e) => {
+          setCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+          setError(null);
+        }}
+        disabled={pending}
+        maxLength={6}
         inputMode="numeric"
+        autoComplete="one-time-code"
+        pattern="[0-9]{6}"
         autoFocus
         aria-label="초대 코드"
+        aria-invalid={Boolean(error)}
         style={{
           position: 'absolute',
           left: 22,
@@ -133,21 +185,35 @@ export default function OnboardingCode() {
           cursor: 'text',
         }}
       />
-      <PrimaryButton
-        label="연결하기"
-        left={22}
-        top={772}
-        width={358}
-        disabled={code.length < 6}
-        onClick={async () => {
-          if (code.length < 6) {
-            inputRef.current?.focus();
-            return;
-          }
-          await connectWithCode(code);
-          navigate('/onboarding/name', { state: { invited: true } });
-        }}
-      />
+      {error && (
+        <p
+          role="alert"
+          style={{
+            position: 'absolute',
+            left: 32,
+            top: 560,
+            width: 338,
+            margin: 0,
+            textAlign: 'center',
+            fontFamily: fonts.sans,
+            fontSize: 15,
+            lineHeight: 1.45,
+            color: palette.text,
+          }}
+        >
+          {error.message}
+        </p>
+      )}
+      <fieldset disabled={!canSubmit || pending} style={{ display: 'contents' }}>
+        <PrimaryButton
+          label={pending ? '연결하는 중…' : error?.retryable ? '다시 시도' : '연결하기'}
+          left={22}
+          top={772}
+          width={358}
+          disabled={!canSubmit || pending}
+          onClick={handleConnect}
+        />
+      </fieldset>
     </Screen>
   );
 }
