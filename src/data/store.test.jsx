@@ -15,6 +15,8 @@ vi.mock('./api', () => ({
   saveFiveSecondRecord: vi.fn(),
   setRecordFlower: vi.fn(),
   updateRecord: vi.fn(),
+  uploadVisitPhotos: vi.fn(),
+  deleteVisitPhoto: vi.fn(),
 }));
 
 const NO_COUPLE = {
@@ -174,9 +176,9 @@ describe('AppProvider bootstrap', () => {
 });
 
 describe('AppProvider actions', () => {
-  async function renderReadyProvider() {
+  async function renderReadyProvider(restoredRecords = RESTORED_RECORDS) {
     api.getCouple.mockResolvedValue(RESTORED_COUPLE);
-    api.getRecords.mockResolvedValue(RESTORED_RECORDS);
+    api.getRecords.mockResolvedValue(restoredRecords);
     renderProvider();
     await waitFor(() => expect(appState.ready).toBe(true));
   }
@@ -314,5 +316,152 @@ describe('AppProvider actions', () => {
 
     expect(api.reissueCoupleInvite).toHaveBeenCalledWith({ requestKey: 'retry-invite-1' });
     expect(appState.couple).toEqual(reissued);
+  });
+
+  it('여러 사진 중 성공과 실패를 함께 보존하고 재시도 때 실패한 파일만 보낸다', async () => {
+    const record = { id: 'record-1', coupleId: 'couple-1', photos: [] };
+    await renderReadyProvider([record]);
+    const firstFile = new File(['a'], 'a.jpg', { type: 'image/jpeg' });
+    const secondFile = new File(['b'], 'b.jpg', { type: 'image/jpeg' });
+    const files = Object.freeze([firstFile, secondFile]);
+    const succeeded = {
+      clientId: 'upload-a',
+      file: firstFile,
+      status: 'succeeded',
+      photo: { id: 'photo-a' },
+    };
+    const failed = {
+      clientId: 'upload-b',
+      file: secondFile,
+      status: 'failed',
+      objectUploaded: true,
+      requestKey: 'stable-b',
+      path: 'couple-1/record-1/b.webp',
+      error: new AppError(ERROR_CODES.network),
+    };
+    const retried = { ...failed, status: 'succeeded', error: null, photo: { id: 'photo-b' } };
+    api.uploadVisitPhotos
+      .mockResolvedValueOnce([succeeded, failed])
+      .mockResolvedValueOnce([retried]);
+    api.getRecords.mockResolvedValue([record]);
+
+    await act(async () => {
+      await appState.addVisitPhotos('record-1', files);
+    });
+
+    expect(api.uploadVisitPhotos).toHaveBeenNthCalledWith(
+      1,
+      { id: 'record-1', coupleId: 'couple-1' },
+      files,
+    );
+    expect(appState.photoUploadsByRecord['record-1']).toEqual([succeeded, failed]);
+
+    await act(async () => {
+      await appState.retryVisitPhotoUploads('record-1');
+    });
+
+    expect(api.uploadVisitPhotos).toHaveBeenNthCalledWith(
+      2,
+      { id: 'record-1', coupleId: 'couple-1' },
+      [failed],
+    );
+    expect(appState.photoUploadsByRecord['record-1']).toEqual([succeeded, retried]);
+  });
+
+  it('사진 추가 버튼을 동시에 두 번 눌러도 같은 in-flight 작업만 수행한다', async () => {
+    const record = { id: 'record-1', coupleId: 'couple-1', photos: [] };
+    await renderReadyProvider([record]);
+    const pending = deferred();
+    const source = new File(['a'], 'a.jpg', { type: 'image/jpeg' });
+    const files = Object.freeze([source]);
+    const failed = [{
+      clientId: 'upload-a',
+      file: source,
+      status: 'failed',
+      error: new AppError(ERROR_CODES.network),
+    }];
+    api.uploadVisitPhotos.mockReturnValue(pending.promise);
+
+    let first;
+    let second;
+    await act(async () => {
+      first = appState.addVisitPhotos('record-1', files);
+      second = appState.addVisitPhotos('record-1', files);
+      pending.resolve(failed);
+      await Promise.all([first, second]);
+    });
+
+    expect(api.uploadVisitPhotos).toHaveBeenCalledTimes(1);
+    await expect(first).resolves.toBe(failed);
+    await expect(second).resolves.toBe(failed);
+    expect(appState.photoUploadsByRecord['record-1']).toEqual(failed);
+  });
+
+  it('업로드 성공 뒤 signed record 새로고침이 실패해도 성공 상태를 재업로드하지 않는다', async () => {
+    const record = { id: 'record-1', coupleId: 'couple-1', photos: [] };
+    await renderReadyProvider([record]);
+    const source = new File(['a'], 'a.jpg', { type: 'image/jpeg' });
+    const succeeded = [{
+      clientId: 'upload-a',
+      file: source,
+      status: 'succeeded',
+      photo: { id: 'photo-a' },
+    }];
+    const networkError = new AppError(ERROR_CODES.network);
+    api.uploadVisitPhotos.mockResolvedValue(succeeded);
+    api.getRecords.mockRejectedValueOnce(networkError);
+
+    let caught;
+    await act(async () => {
+      caught = await appState.addVisitPhotos('record-1', [source]).catch((error) => error);
+    });
+
+    expect(caught).toBe(networkError);
+    expect(appState.photoUploadsByRecord['record-1']).toEqual(succeeded);
+    const refreshed = [{ ...record, photos: [{ id: 'photo-a', url: 'https://signed.invalid/a' }] }];
+    api.getRecords.mockResolvedValue(refreshed);
+    await act(async () => {
+      await expect(appState.retryVisitPhotoUploads('record-1')).resolves.toEqual(succeeded);
+    });
+    expect(api.uploadVisitPhotos).toHaveBeenCalledTimes(1);
+    expect(api.getRecords).toHaveBeenCalledTimes(3);
+    expect(appState.records).toEqual(refreshed);
+  });
+
+  it('삭제 실패 단계와 object 삭제 여부를 보존하고 재시도에 그대로 전달한다', async () => {
+    const photo = {
+      id: 'photo-a',
+      bucket: 'visit-photos',
+      path: 'couple-1/record-1/a.webp',
+      ownedByMe: true,
+    };
+    const record = { id: 'record-1', coupleId: 'couple-1', photos: [photo] };
+    await renderReadyProvider([record]);
+    const failed = {
+      photoId: 'photo-a',
+      status: 'failed',
+      objectDeleted: true,
+      error: new AppError(ERROR_CODES.network),
+    };
+    const succeeded = { ...failed, status: 'succeeded', error: null };
+    api.deleteVisitPhoto
+      .mockResolvedValueOnce(failed)
+      .mockResolvedValueOnce(succeeded);
+    api.getRecords.mockResolvedValue([{ ...record, photos: [] }]);
+
+    await act(async () => {
+      await appState.deleteVisitPhoto('record-1', photo);
+    });
+
+    expect(appState.photoDeletesByRecord['record-1']['photo-a']).toEqual(failed);
+
+    await act(async () => {
+      await appState.retryDeleteVisitPhoto('record-1', 'photo-a');
+    });
+
+    expect(api.deleteVisitPhoto).toHaveBeenNthCalledWith(1, photo, undefined);
+    expect(api.deleteVisitPhoto).toHaveBeenNthCalledWith(2, photo, failed);
+    expect(appState.photoDeletesByRecord['record-1']['photo-a']).toEqual(succeeded);
+    expect(appState.records[0].photos).toEqual([]);
   });
 });

@@ -63,6 +63,7 @@ describe('getRecords', () => {
     expect(query.columns).toContain('visit_entries');
     expect(query.columns).toContain('visit_tags');
     expect(query.columns).toContain('visit_photos');
+    expect(query.columns).toContain('uploader_id');
   });
 
   it('mock 픽스처를 섞지 않는다 — 서버가 빈 목록이면 빈 목록이다', async () => {
@@ -128,6 +129,76 @@ describe('getRecords', () => {
     await visits.getRecords();
 
     expect(queriesFor(client, 'visits')[0].filters).toEqual([]);
+  });
+
+  it('두 구성원에게 uploader 소유권과 순서를 포함한 private signed URL을 돌려준다', async () => {
+    const path = 'c1/v1/private.webp';
+    const { client, visits } = build({
+      tables: {
+        visits: [visitRow({
+          visit_photos: [{
+            id: 'photo-1',
+            uploader_id: PARTNER,
+            ordinal: 1,
+            storage_bucket: 'visit-photos',
+            storage_path: path,
+          }],
+        })],
+      },
+      storage: {
+        'visit-photos': {
+          createSignedUrl: { signedUrl: `https://signed.invalid/${path}` },
+        },
+      },
+    });
+
+    const [record] = await visits.getRecords();
+
+    expect(record.photos).toEqual([{
+      id: 'photo-1',
+      uploaderId: PARTNER,
+      ownedByMe: false,
+      ordinal: 1,
+      order: 1,
+      bucket: 'visit-photos',
+      path,
+      url: `https://signed.invalid/${path}`,
+      urlExpiresAt: '2026-07-30T04:15:06.000Z',
+    }]);
+    expect(client.calls.storage).toEqual([expect.objectContaining({
+      bucket: 'visit-photos',
+      method: 'createSignedUrl',
+      path,
+      expiresIn: 600,
+    })]);
+  });
+
+  it('signed URL 생성 실패는 기존 visit shape을 훼손하지 않고 안전한 AppError로 거부한다', async () => {
+    const rawMessage = 'signing failed at https://storage.invalid?token=private';
+    const { visits } = build({
+      tables: {
+        visits: [visitRow({
+          visit_photos: [{
+            id: 'photo-1',
+            uploader_id: ME,
+            ordinal: 1,
+            storage_bucket: 'visit-photos',
+            storage_path: 'c1/v1/private.webp',
+          }],
+        })],
+      },
+      storage: {
+        'visit-photos': {
+          createSignedUrl: transportFailure({ status: 500, message: rawMessage }),
+        },
+      },
+    });
+
+    const error = await visits.getRecords().catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: ERROR_CODES.network, retryable: true });
+    expect(error.message).not.toContain('storage.invalid');
+    expect(error.message).not.toContain('private');
   });
 });
 

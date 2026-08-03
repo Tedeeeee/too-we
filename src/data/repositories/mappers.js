@@ -104,8 +104,11 @@ export function mapVisit(row, userId) {
     .map((photo) => ({
       id: photo.id,
       ordinal: photo.ordinal,
+      order: photo.ordinal,
       bucket: photo.storage_bucket,
       path: photo.storage_path,
+      uploaderId: photo.uploader_id,
+      ownedByMe: photo.uploader_id === userId,
     }));
 
   return {

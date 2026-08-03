@@ -28,6 +28,8 @@ export const getRecord = (...args) => repositories.visits.getRecord(...args);
 export const saveFiveSecondRecord = (...args) => repositories.visits.saveFiveSecondRecord(...args);
 export const setRecordFlower = (...args) => repositories.visits.setRecordFlower(...args);
 export const updateRecord = (...args) => repositories.visits.updateRecord(...args);
+export const uploadVisitPhotos = (...args) => repositories.photos.uploadVisitPhotos(...args);
+export const deleteVisitPhoto = (...args) => repositories.photos.deleteVisitPhoto(...args);
 
 export const getWishlist = (...args) => repositories.wishlist.getWishlist(...args);
 export const getSettings = (...args) => repositories.settings.getSettings(...args);

@@ -249,17 +249,67 @@ describe('mapVisit — 화면 기록 셰이프', () => {
     const record = mapVisit(
       visitRow({
         visit_photos: [
-          { id: 'p2', ordinal: 2, storage_bucket: 'visit-photos', storage_path: 'c1/v1/b.webp' },
-          { id: 'p1', ordinal: 1, storage_bucket: 'visit-photos', storage_path: 'c1/v1/a.webp' },
+          {
+            id: 'p2',
+            uploader_id: PARTNER,
+            ordinal: 2,
+            storage_bucket: 'visit-photos',
+            storage_path: 'c1/v1/b.webp',
+          },
+          {
+            id: 'p1',
+            uploader_id: ME,
+            ordinal: 1,
+            storage_bucket: 'visit-photos',
+            storage_path: 'c1/v1/a.webp',
+          },
         ],
       }),
       ME,
     );
 
     expect(record.photos).toEqual([
-      { id: 'p1', ordinal: 1, bucket: 'visit-photos', path: 'c1/v1/a.webp' },
-      { id: 'p2', ordinal: 2, bucket: 'visit-photos', path: 'c1/v1/b.webp' },
+      {
+        id: 'p1',
+        ordinal: 1,
+        order: 1,
+        bucket: 'visit-photos',
+        path: 'c1/v1/a.webp',
+        uploaderId: ME,
+        ownedByMe: true,
+      },
+      {
+        id: 'p2',
+        ordinal: 2,
+        order: 2,
+        bucket: 'visit-photos',
+        path: 'c1/v1/b.webp',
+        uploaderId: PARTNER,
+        ownedByMe: false,
+      },
     ]);
+  });
+
+  it('사진 소유권 투영은 같은 방문을 보는 사용자에 따라 바뀌지만 기존 pending 계산은 바뀌지 않는다', () => {
+    const row = visitRow({
+      visit_entries: [{ author_id: ME, note: null, rating: 5 }],
+      visit_photos: [{
+        id: 'p1',
+        uploader_id: ME,
+        ordinal: 1,
+        storage_bucket: 'visit-photos',
+        storage_path: 'c1/v1/a.webp',
+      }],
+    });
+
+    expect(mapVisit(row, ME)).toMatchObject({
+      pending: true,
+      photos: [{ uploaderId: ME, ownedByMe: true, order: 1 }],
+    });
+    expect(mapVisit(row, PARTNER)).toMatchObject({
+      pending: true,
+      photos: [{ uploaderId: ME, ownedByMe: false, order: 1 }],
+    });
   });
 
   it('내 한 줄을 먼저, 상대 한 줄을 뒤에 놓는다', () => {
