@@ -110,6 +110,31 @@ describe('RecordNew blank visit form', () => {
     },
   );
 
+  it('결과를 확정할 수 없는 실패도 같은 방문 생성 의도로 재시도한다', async () => {
+    const user = userEvent.setup();
+    const saveFiveSecondRecord = vi
+      .fn()
+      .mockRejectedValueOnce(new AppError(ERROR_CODES.unknown))
+      .mockResolvedValueOnce({ id: 'visit-1' });
+    renderRecord({ place: PLACE }, saveFiveSecondRecord);
+    setVisitIntent('2026-08-05', '14:35');
+
+    await user.click(screen.getByRole('button', { name: '빈 방문 저장' }));
+    await screen.findByRole('alert');
+    const firstPayload = saveFiveSecondRecord.mock.calls[0][0];
+
+    await user.click(screen.getByRole('button', { name: '다시 저장' }));
+
+    expect(saveFiveSecondRecord).toHaveBeenCalledTimes(2);
+    expect(firstPayload).toEqual({
+      place: PLACE,
+      date: new Date(2026, 7, 5, 14, 35, 0, 0).toISOString(),
+      requestKey: expect.any(String),
+    });
+    expect(saveFiveSecondRecord.mock.calls[1][0]).toEqual(firstPayload);
+    expect(await screen.findByText('목적지 화면')).toBeInTheDocument();
+  });
+
   it('재시도 가능한 실패 뒤 날짜·시간 의도를 고치면 새 requestKey를 만든다', async () => {
     const user = userEvent.setup();
     const saveFiveSecondRecord = vi

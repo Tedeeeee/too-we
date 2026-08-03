@@ -80,7 +80,6 @@ function BlankVisitForm({ navigate, place, saveFiveSecondRecord }) {
     if (inFlightRef.current) return;
     const date = combineLocalVisitIntent(dateValue, timeValue);
     if (!date) {
-      requestKeyRef.current = null;
       setError({ message: '방문 날짜와 시간을 다시 확인해 주세요.', retryable: false });
       return;
     }
@@ -96,7 +95,6 @@ function BlankVisitForm({ navigate, place, saveFiveSecondRecord }) {
       navigate('/', { replace: true });
     } catch (nextError) {
       const appError = toAppError(nextError);
-      if (!appError.retryable) requestKeyRef.current = null;
       setError({ message: userMessage(appError.code), retryable: appError.retryable });
     } finally {
       inFlightRef.current = false;

@@ -86,6 +86,20 @@ describe('Home new visit navigation', () => {
 });
 
 describe('Home pending partition', () => {
+  it('대기 기록은 한 줄 안내와 접근 가능한 CTA로 recordId만 전달한다', async () => {
+    const user = userEvent.setup();
+    const pending = record({ id: 'pending-line', placeName: '한 줄 대기 장소' });
+    const { container } = renderHome({ records: [pending] });
+    const pendingCard = container.querySelector('[data-pending-card]');
+
+    expect(within(pendingCard).getByText('오늘의 한 줄을 남겨주세요')).toBeInTheDocument();
+    await user.click(within(pendingCard).getByRole('button', { name: '한 줄을 남겨주세요' }));
+
+    expect(await screen.findByText('목적지 화면')).toBeInTheDocument();
+    expect(destinationLocation.pathname).toBe('/record');
+    expect(destinationLocation.state).toEqual({ recordId: 'pending-line' });
+  });
+
   it('entries나 공동 꾸밈 데이터가 아니라 현재 사용자용 pending만 따른다', () => {
     const pending = record({
       id: 'pending',

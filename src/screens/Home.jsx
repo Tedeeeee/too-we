@@ -251,7 +251,7 @@ export default function Home() {
                 {rec.placeName}
               </div>
               <div style={{ position: 'absolute', left: 43, top: 100, fontFamily: fonts.hand, fontSize: 24, color: palette.textMuted }}>
-                오늘의 꽃갈피를 남겨주세요
+                오늘의 한 줄을 남겨주세요
               </div>
               <img
                 src={etcSvg.flowerBlank}
@@ -290,7 +290,7 @@ export default function Home() {
                   alt=""
                   style={{ display: 'block', filter: 'invert(1)', pointerEvents: 'none' }}
                 />
-                꽃갈피를 남겨주세요
+                한 줄을 남겨주세요
               </button>
             </div>
           );
