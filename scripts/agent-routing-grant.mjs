@@ -146,7 +146,8 @@ function parseArgv(argv) {
   return { command, values, errors };
 }
 
-function defaultOrca() {
+/** 실제 Orca CLI 어댑터. 테스트는 같은 모양의 스텁을 주입한다. */
+export function createOrcaAdapter() {
   return {
     /** taskId는 호출 전에 TASK_ID_PATTERN으로 검사되므로 셸 메타문자가 들어올 수 없다. */
     dispatchShow(taskId) {
@@ -205,7 +206,7 @@ export function runGrant(options = {}) {
     argv = [],
     cwd = process.cwd(),
     now = new Date(),
-    orca = defaultOrca(),
+    orca = createOrcaAdapter(),
     log = console.log,
     error = console.error,
   } = options;
