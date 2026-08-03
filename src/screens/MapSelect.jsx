@@ -31,13 +31,35 @@ const locationErrorMessage = (error) => {
   return '현재 위치를 확인할 수 없어요. 키워드로 검색해 주세요.';
 };
 
-const clonePlace = (place) => (
-  place && typeof place === 'object' ? { ...place } : place
-);
+const PLACE_SNAPSHOT_KEYS = [
+  'id',
+  'providerId',
+  'provider_id',
+  'provider',
+  'name',
+  'category',
+  'address',
+  'roadAddress',
+  'road_address',
+  'phone',
+  'url',
+  'lat',
+  'lng',
+  'walk',
+];
+
+const freezePlaceSnapshot = (place) => {
+  if (!place || typeof place !== 'object' || Array.isArray(place)) return place;
+  const snapshot = {};
+  PLACE_SNAPSHOT_KEYS.forEach((key) => {
+    if (Object.hasOwn(place, key)) snapshot[key] = place[key];
+  });
+  return Object.freeze(snapshot);
+};
 
 const freezeEditDraft = (draft, placeOverride) => {
   if (!draft || typeof draft !== 'object') return null;
-  const place = clonePlace(placeOverride || draft.place);
+  const place = freezePlaceSnapshot(placeOverride || draft.place);
   const tags = Object.freeze(Array.isArray(draft.tags) ? draft.tags.slice() : []);
   return Object.freeze({
     place: place && typeof place === 'object' ? Object.freeze(place) : place,
@@ -73,6 +95,13 @@ export default function MapSelect() {
     ? routeLocation.state.recordId
     : null;
   const editDraft = editRecordId ? freezeEditDraft(routeLocation.state?.draft) : null;
+  const isWishlistAddIntent = routeLocation.state?.intent === 'wishlist-add';
+  const wishlistEditId = routeLocation.state?.intent === 'wishlist-edit'
+    && typeof routeLocation.state?.wishlistId === 'string'
+    && routeLocation.state.wishlistId.trim()
+    ? routeLocation.state.wishlistId.trim()
+    : null;
+  const isWishlistIntent = isWishlistAddIntent || Boolean(wishlistEditId);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -191,7 +220,7 @@ export default function MapSelect() {
   const selectPlace = (place) => {
     if (!place) return;
     setSelectedPlaceId(place.id);
-    const snapshot = Object.freeze({ ...place });
+    const snapshot = freezePlaceSnapshot(place);
     if (editRecordId) {
       const returnedDraft = freezeEditDraft(editDraft, snapshot);
       navigate(`/place/${editRecordId}/edit`, {
@@ -199,6 +228,24 @@ export default function MapSelect() {
         state: returnedDraft
           ? Object.freeze({ draft: returnedDraft })
           : Object.freeze({ place: snapshot }),
+      });
+      return;
+    }
+    if (isWishlistAddIntent) {
+      navigate('/mypage/wishlist', {
+        replace: true,
+        state: Object.freeze({ intent: 'wishlist-add', place: snapshot }),
+      });
+      return;
+    }
+    if (wishlistEditId) {
+      navigate('/mypage/wishlist', {
+        replace: true,
+        state: Object.freeze({
+          intent: 'wishlist-edit',
+          wishlistId: wishlistEditId,
+          place: snapshot,
+        }),
       });
       return;
     }
@@ -241,12 +288,14 @@ export default function MapSelect() {
       <BackButton
         left={16}
         top={68}
-        onClick={editRecordId && editDraft
-          ? () => navigate(`/place/${editRecordId}/edit`, {
-              replace: true,
-              state: Object.freeze({ draft: freezeEditDraft(editDraft) }),
-            })
-          : undefined}
+        onClick={isWishlistIntent
+          ? () => navigate('/mypage/wishlist', { replace: true })
+          : editRecordId && editDraft
+            ? () => navigate(`/place/${editRecordId}/edit`, {
+                replace: true,
+                state: Object.freeze({ draft: freezeEditDraft(editDraft) }),
+              })
+            : undefined}
       />
 
       <form
