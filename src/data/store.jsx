@@ -235,6 +235,14 @@ export function AppProvider({ children }) {
     return nextRecords;
   }, []);
 
+  /**
+   * 기록만 다시 읽는다. bootstrap 상태를 건드리지 않아 App이 라우트를 내리지 않고,
+   * 보고 있던 화면과 사진 페이저가 유지된다. 실패는 호출부가 그 자리에서 처리하도록
+   * 그대로 reject한다. 호출부 인자(예: PlaceDetail의 활성 사진)가 epoch guard로
+   * 새어 들어가지 않게 인자를 받지 않는다.
+   */
+  const retryRecords = useCallback(() => refreshRecords(), [refreshRecords]);
+
   const recordForPhotoAction = useCallback((recordId) => {
     const record = recordsRef.current.find((item) => item.id === recordId);
     if (!record) throw new AppError(ERROR_CODES.not_found, { cause: { resource: 'visit' } });
@@ -347,10 +355,9 @@ export function AppProvider({ children }) {
       const epoch = sharedDataEpochRef.current;
 
       const operation = (async () => {
+        let result;
         try {
-          const result = await mutation();
-          if (epoch === sharedDataEpochRef.current) await refreshWishlist(epoch);
-          return result;
+          result = await mutation();
         } catch (error) {
           const appError = toAppError(error);
           if (mountedRef.current && epoch === sharedDataEpochRef.current) {
@@ -359,6 +366,15 @@ export function AppProvider({ children }) {
           }
           throw appError;
         }
+
+        // 쓰기는 이미 성공했다. 뒤이은 조회 실패는 refreshWishlist가 wishlistStatus
+        // error(직전 목록 유지)로 이미 알리므로 여기서 다시 던지지 않는다. 던지면 화면이
+        // 쓰기 실패로 읽고 그 재시도가 같은 쓰기를 반복하는데, repository에 멱등키나
+        // 유일성 규칙이 없어 행이 중복된다.
+        if (epoch === sharedDataEpochRef.current) {
+          await refreshWishlist(epoch).catch(() => {});
+        }
+        return result;
       })().finally(() => {
         if (wishlistMutationInFlightRef.current.get(key) === operation) {
           wishlistMutationInFlightRef.current.delete(key);
@@ -530,6 +546,7 @@ export function AppProvider({ children }) {
       bootstrapError,
       retryBootstrap,
       retryWishlist,
+      retryRecords,
       photoUploadsByRecord,
       photoDeletesByRecord,
       ...actions,
@@ -545,6 +562,7 @@ export function AppProvider({ children }) {
       bootstrapError,
       retryBootstrap,
       retryWishlist,
+      retryRecords,
       photoUploadsByRecord,
       photoDeletesByRecord,
       actions,

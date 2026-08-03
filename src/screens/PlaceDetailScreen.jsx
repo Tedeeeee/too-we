@@ -17,7 +17,7 @@ import { seasonFromDate } from '@/data/format';
 export default function PlaceDetailScreen() {
   const navigate = useNavigate();
   const { recordId } = useParams();
-  const { couple, ready, retryBootstrap } = useApp();
+  const { couple, ready, retryRecords } = useApp();
   const record = useRecord(recordId);
   const [photoIdx, setPhotoIdx] = useState(0);
 
@@ -38,7 +38,7 @@ export default function PlaceDetailScreen() {
       season={seasonFromDate(record.date)}
       photoIndex={Math.min(photoIdx, Math.max(photoCount - 1, 0))}
       onNextPhoto={nextPhoto}
-      onRetryPhotos={retryBootstrap}
+      onRetryPhotos={retryRecords}
       onBack={() => navigate(-1)}
       onOpenPick={() => navigate('/pick', { state: { recordId } })}
       onOpenEdit={() => navigate(`/place/${recordId}/edit`)}

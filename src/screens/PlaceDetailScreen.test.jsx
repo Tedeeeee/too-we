@@ -29,6 +29,7 @@ beforeEach(() => {
   useApp.mockReturnValue({
     ready: true,
     retryBootstrap: vi.fn().mockResolvedValue(undefined),
+    retryRecords: vi.fn().mockResolvedValue([]),
     couple: {
       me: { name: '나', initial: '나' },
       partner: { name: '짝궁', initial: '짝' },
@@ -36,6 +37,15 @@ beforeEach(() => {
   });
   useRecord.mockReturnValue(RECORD);
 });
+
+const renderDetail = () => render(
+  <MemoryRouter initialEntries={['/place/visit-1']}>
+    <Routes>
+      <Route path="/" element={<div>홈 화면</div>} />
+      <Route path="/place/:recordId" element={<PlaceDetailScreen />} />
+    </Routes>
+  </MemoryRouter>,
+);
 
 describe('PlaceDetailScreen photo carousel', () => {
   it('정렬된 실제 사진을 순환하고 개수 표기를 맞춘다', async () => {
@@ -60,6 +70,55 @@ describe('PlaceDetailScreen photo carousel', () => {
       'src',
       'https://signed.invalid/late',
     );
+  });
+});
+
+describe('PlaceDetailScreen photo retry scope', () => {
+  const NO_URL_RECORD = {
+    ...RECORD,
+    photos: [{ id: 'no-url', order: 1, url: null }],
+  };
+
+  it('사진 다시 불러오기는 전체 부트스트랩이 아니라 기록만 새로 읽고 화면을 유지한다', async () => {
+    const user = userEvent.setup();
+    const retryBootstrap = vi.fn().mockResolvedValue(undefined);
+    const retryRecords = vi.fn().mockResolvedValue([]);
+    useApp.mockReturnValue({
+      ready: true,
+      retryBootstrap,
+      retryRecords,
+      couple: { me: { name: '나', initial: '나' }, partner: { name: '짝궁', initial: '짝' } },
+    });
+    useRecord.mockReturnValue(NO_URL_RECORD);
+
+    renderDetail();
+    await user.click(screen.getByRole('button', { name: '이 사진 다시 불러오기' }));
+
+    // retryBootstrap은 App이 라우트를 내려 상세 화면과 사진 인덱스를 잃게 만든다.
+    expect(retryRecords).toHaveBeenCalledTimes(1);
+    expect(retryBootstrap).not.toHaveBeenCalled();
+    expect(screen.getByText('사진 장소')).toBeInTheDocument();
+  });
+
+  it('기록 다시 읽기가 실패해도 상세 화면을 유지하고 그 사진만 다시 시도하게 남긴다', async () => {
+    const user = userEvent.setup();
+    const retryRecords = vi.fn().mockRejectedValue(new Error('refresh failed'));
+    useApp.mockReturnValue({
+      ready: true,
+      retryBootstrap: vi.fn(),
+      retryRecords,
+      couple: { me: { name: '나', initial: '나' }, partner: { name: '짝궁', initial: '짝' } },
+    });
+    useRecord.mockReturnValue(NO_URL_RECORD);
+
+    renderDetail();
+    await user.click(screen.getByRole('button', { name: '이 사진 다시 불러오기' }));
+
+    expect(retryRecords).toHaveBeenCalledTimes(1);
+    // 실패해도 홈으로 튕기거나 언마운트되지 않고 같은 사진을 다시 시도할 수 있다.
+    expect(screen.getByText('사진 장소')).toBeInTheDocument();
+    expect(screen.queryByText('홈 화면')).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '이 사진 다시 불러오기' })).toBeInTheDocument();
   });
 });
 
