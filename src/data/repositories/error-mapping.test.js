@@ -89,7 +89,15 @@ describe('envelopeToError', () => {
   });
 
   it('초대 실패 갈래를 domainCode로 구분할 수 있다', () => {
-    const codes = ['invite_not_found', 'invite_expired', 'invite_consumed', 'invite_revoked', 'couple_capacity_reached'];
+    const codes = [
+      'invite_not_found',
+      'invite_expired',
+      'invite_consumed',
+      'invite_revoked',
+      'couple_capacity_reached',
+      'active_membership_conflict',
+      'rate_limited',
+    ];
     const seen = codes.map((code) => envelopeToError(errorEnvelope(code)).domainCode);
 
     expect(seen).toEqual(codes);

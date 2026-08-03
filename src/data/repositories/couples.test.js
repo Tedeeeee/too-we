@@ -14,6 +14,7 @@ import {
 
 const ME = '11111111-1111-4111-8111-111111111111';
 const PARTNER = '22222222-2222-4222-8222-222222222222';
+const NOW = new Date('2026-05-03T12:00:00Z');
 
 const COUPLE_ROW = {
   id: 'c1',
@@ -41,9 +42,9 @@ const connectedTables = (over = {}) => ({
   ...over,
 });
 
-const build = (config = {}) => {
+const build = ({ now = () => NOW, newRequestKey = () => 'request-key-1', ...config } = {}) => {
   const client = createFakeSupabaseClient({ userId: ME, ...config });
-  const repositories = createRepositories({ client, newRequestKey: () => 'request-key-1' });
+  const repositories = createRepositories({ client, newRequestKey, now });
   return { client, couples: repositories.couples };
 };
 
@@ -56,6 +57,7 @@ describe('getCouple', () => {
       connected: true,
       onboarded: true,
       inviteCode: '482195',
+      inviteExpiresAt: '2026-05-04T00:00:00.000Z',
       startDate: '2026-05-03',
       me: { id: 'me', name: '지은' },
       partner: { id: 'partner', name: '태식' },
@@ -81,6 +83,21 @@ describe('getCouple', () => {
     await couples.getCouple();
 
     expect(queriesFor(client, 'couple_invites')[0].filters).toEqual([['eq', 'status', 'active']]);
+  });
+
+  it('DB status가 active여도 만료 시각이 지난 초대 코드는 공유하지 않는다', async () => {
+    const { couples } = build({
+      tables: connectedTables({
+        couple_invites: [
+          { code: '482195', status: 'active', expires_at: '2026-05-03T11:59:59Z' },
+        ],
+      }),
+    });
+
+    await expect(couples.getCouple()).resolves.toMatchObject({
+      inviteCode: '',
+      inviteExpiresAt: '2026-05-03T11:59:59.000Z',
+    });
   });
 
   it('커플이 없으면 초대 코드를 조회하지 않고 온보딩 전 상태를 준다', async () => {
@@ -151,6 +168,24 @@ describe('createCouple', () => {
     expect(lastRpcArgs(client, 'create_couple').p_request_key).toBe('caller-key');
   });
 
+  it('같은 create 요청을 재시도해도 호출자가 준 멱등 키를 새 키로 바꾸지 않는다', async () => {
+    let requestKeyGenerationCount = 0;
+    const { client, couples } = build({
+      newRequestKey: () => `generated-${++requestKeyGenerationCount}`,
+      tables: connectedTables(),
+      rpc: { create_couple: okEnvelope({ couple_id: 'c1' }, true) },
+    });
+
+    await couples.createCouple({ requestKey: 'same-create-key' });
+    await couples.createCouple({ requestKey: 'same-create-key' });
+
+    expect(client.calls.rpc.map((call) => call.args.p_request_key)).toEqual([
+      'same-create-key',
+      'same-create-key',
+    ]);
+    expect(requestKeyGenerationCount).toBe(0);
+  });
+
   it('초대 코드 유효기간 미설정(TW014)은 configuration 오류다', async () => {
     const { couples } = build({
       tables: connectedTables(),
@@ -217,28 +252,26 @@ describe('connectWithCode', () => {
     expect(couple.connected).toBe(false);
   });
 
-  it('사용된 코드와 만료된 코드를 구분해서 거부한다', async () => {
-    const consumed = build({
+  it.each([
+    ['invite_not_found', ERROR_CODES.not_found, false],
+    ['invite_expired', ERROR_CODES.validation, false],
+    ['invite_consumed', ERROR_CODES.conflict, false],
+    ['invite_revoked', ERROR_CODES.validation, false],
+    ['couple_capacity_reached', ERROR_CODES.conflict, false],
+    ['active_membership_conflict', ERROR_CODES.conflict, false],
+    ['rate_limited', ERROR_CODES.rate_limited, true],
+  ])('%s 초대 실패를 다른 domainCode로 보존한다', async (domainCode, code, retryable) => {
+    const { couples } = build({
       tables: connectedTables(),
-      rpc: { join_couple_with_code: errorEnvelope('invite_consumed', { consumed_at: 'x' }) },
-    });
-    const expired = build({
-      tables: connectedTables(),
-      rpc: { join_couple_with_code: errorEnvelope('invite_expired', { expired_at: 'x' }) },
-    });
-    const capacity = build({
-      tables: connectedTables(),
-      rpc: { join_couple_with_code: errorEnvelope('couple_capacity_reached') },
+      rpc: {
+        join_couple_with_code: errorEnvelope(domainCode, { retry_after_seconds: 600 }),
+      },
     });
 
-    await expect(consumed.couples.connectWithCode('482195')).rejects.toMatchObject({
-      domainCode: 'invite_consumed',
-    });
-    await expect(expired.couples.connectWithCode('482195')).rejects.toMatchObject({
-      domainCode: 'invite_expired',
-    });
-    await expect(capacity.couples.connectWithCode('482195')).rejects.toMatchObject({
-      domainCode: 'couple_capacity_reached',
+    await expect(couples.connectWithCode('482195')).rejects.toMatchObject({
+      code,
+      domainCode,
+      retryable,
     });
   });
 
@@ -254,6 +287,86 @@ describe('connectWithCode', () => {
       details: { retry_after_seconds: 600 },
     });
   });
+
+  it('같은 join 요청을 재시도해도 호출자가 준 멱등 키를 새 키로 바꾸지 않는다', async () => {
+    let requestKeyGenerationCount = 0;
+    const { client, couples } = build({
+      newRequestKey: () => `generated-${++requestKeyGenerationCount}`,
+      tables: connectedTables(),
+      rpc: { join_couple_with_code: okEnvelope({ couple_id: 'c1', slot: 2 }, true) },
+    });
+
+    await couples.connectWithCode('482195', { requestKey: 'same-join-key' });
+    await couples.connectWithCode('482195', { requestKey: 'same-join-key' });
+
+    expect(client.calls.rpc.map((call) => call.args.p_request_key)).toEqual([
+      'same-join-key',
+      'same-join-key',
+    ]);
+    expect(requestKeyGenerationCount).toBe(0);
+  });
+});
+
+describe('reissueCoupleInvite', () => {
+  it('만료되거나 폐기된 활성 커플 초대를 RPC로 재발급하고 최신 상태를 읽는다', async () => {
+    const { client, couples } = build({
+      tables: connectedTables({
+        couple_invites: [
+          { code: '731904', status: 'active', expires_at: '2026-05-05T00:00:00Z' },
+        ],
+      }),
+      rpc: {
+        reissue_couple_invite: okEnvelope({
+          couple_id: 'c1',
+          invite: { code: '731904', status: 'active', expires_at: '2026-05-05T00:00:00Z' },
+        }),
+      },
+    });
+
+    await expect(
+      couples.reissueCoupleInvite({ requestKey: 'same-reissue-key' }),
+    ).resolves.toMatchObject({
+      inviteCode: '731904',
+      inviteExpiresAt: '2026-05-05T00:00:00.000Z',
+    });
+    expect(lastRpcArgs(client, 'reissue_couple_invite')).toEqual({
+      p_request_key: 'same-reissue-key',
+    });
+  });
+
+  it('재발급 재시도도 호출자가 준 같은 멱등 키를 유지한다', async () => {
+    let requestKeyGenerationCount = 0;
+    const { client, couples } = build({
+      newRequestKey: () => `generated-${++requestKeyGenerationCount}`,
+      tables: connectedTables(),
+      rpc: {
+        reissue_couple_invite: okEnvelope({ couple_id: 'c1' }, true),
+      },
+    });
+
+    await couples.reissueCoupleInvite({ requestKey: 'same-reissue-key' });
+    await couples.reissueCoupleInvite({ requestKey: 'same-reissue-key' });
+
+    expect(client.calls.rpc.map((call) => call.args.p_request_key)).toEqual([
+      'same-reissue-key',
+      'same-reissue-key',
+    ]);
+    expect(requestKeyGenerationCount).toBe(0);
+  });
+
+  it('재발급 실패는 AppError를 보존하고 성공 상태를 만들어내지 않는다', async () => {
+    const { client, couples } = build({
+      tables: connectedTables(),
+      rpc: {
+        reissue_couple_invite: transportFailure(new TypeError('Failed to fetch')),
+      },
+    });
+
+    await expect(
+      couples.reissueCoupleInvite({ requestKey: 'same-reissue-key' }),
+    ).rejects.toMatchObject({ code: ERROR_CODES.network, retryable: true });
+    expect(queriesFor(client, 'couples')).toHaveLength(0);
+  });
 });
 
 describe('setMyName', () => {
@@ -265,6 +378,27 @@ describe('setMyName', () => {
 
     await expect(couples.setMyName('  지은  ')).resolves.toMatchObject({ me: { name: '지은', initial: '지' } });
     expect(lastRpcArgs(client, 'upsert_my_profile')).toEqual({ p_display_name: '지은' });
+  });
+
+  it('저장한 이름은 이후 조회에서도 RLS 프로필 행에서 다시 읽는다', async () => {
+    let displayName = null;
+    const { couples } = build({
+      tables: connectedTables({
+        profiles: () => [{ id: ME, display_name: displayName }],
+      }),
+      rpc: {
+        upsert_my_profile: (args) => {
+          displayName = args.p_display_name;
+          return okEnvelope({ user_id: ME, display_name: displayName });
+        },
+      },
+    });
+
+    await couples.setMyName('  지은  ');
+
+    await expect(couples.getCouple()).resolves.toMatchObject({
+      me: { userId: ME, name: '지은' },
+    });
   });
 
   it('빈 이름은 서버를 부르지 않고 validation으로 거부한다', async () => {

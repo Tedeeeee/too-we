@@ -6,6 +6,32 @@ import { createFakeSupabaseClient } from './__fixtures__/fake-supabase';
 const repo = (client) => createSessionRepository({ getClient: () => client });
 
 describe('createSessionRepository', () => {
+  it('첫 실행에서 만든 익명 사용자를 다음 저장소 실행이 브라우저 세션에서 복원한다', async () => {
+    let persistedSession = null;
+    let signInCount = 0;
+    const calls = [];
+    const client = {
+      auth: {
+        async getSession() {
+          calls.push('getSession');
+          return { data: { session: persistedSession }, error: null };
+        },
+        async signInAnonymously() {
+          calls.push('signInAnonymously');
+          signInCount += 1;
+          persistedSession = { user: { id: `anonymous-${signInCount}` } };
+          return { data: { session: persistedSession }, error: null };
+        },
+      },
+    };
+
+    await expect(repo(client).ensureUserId()).resolves.toBe('anonymous-1');
+    await expect(repo(client).ensureUserId()).resolves.toBe('anonymous-1');
+
+    expect(signInCount).toBe(1);
+    expect(calls).toEqual(['getSession', 'signInAnonymously', 'getSession']);
+  });
+
   it('세션이 있으면 그 사용자 id를 쓰고 새로 로그인하지 않는다', async () => {
     const client = createFakeSupabaseClient({ userId: 'existing-user' });
 
@@ -49,6 +75,39 @@ describe('createSessionRepository', () => {
     await session.ensureUserId();
 
     expect(client.calls.auth).toEqual(['getSession', 'getSession']);
+  });
+
+  it('진행 중인 익명 로그인 뒤 reset되면 늦게 도착한 이전 사용자 id를 재사용하지 않는다', async () => {
+    let releaseFirstSignIn;
+    let signInCount = 0;
+    const client = {
+      auth: {
+        async getSession() {
+          return { data: { session: null }, error: null };
+        },
+        async signInAnonymously() {
+          signInCount += 1;
+          if (signInCount === 1) {
+            return new Promise((resolve) => {
+              releaseFirstSignIn = () => resolve({
+                data: { session: { user: { id: 'stale-user' } } },
+                error: null,
+              });
+            });
+          }
+          return { data: { session: { user: { id: 'current-user' } } }, error: null };
+        },
+      },
+    };
+    const session = repo(client);
+
+    const pending = session.ensureUserId();
+    await Promise.resolve();
+    session.reset();
+    releaseFirstSignIn();
+
+    await expect(pending).resolves.toBe('current-user');
+    expect(signInCount).toBe(2);
   });
 
   it('세션 조회 실패는 auth 오류로 번역한다', async () => {
