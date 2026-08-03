@@ -658,13 +658,14 @@ describe('AppProvider actions', () => {
     expect(place).toEqual(original);
   });
 
-  it('가고 싶은 곳 쓰기나 후속 조회가 실패하면 마지막 성공 목록을 보존하고 AppError 상태로 재시도할 수 있다', async () => {
+  it('가고 싶은 곳 쓰기가 실패하면 마지막 성공 목록을 보존하고 AppError 상태로 다시 쓸 수 있다', async () => {
     await renderReadyProvider();
     const networkError = new AppError(ERROR_CODES.network);
     const input = Object.freeze({ provider: 'manual', name: '새 장소' });
+    const created = { id: 'wishlist-2', ...input };
     api.createWishlistPlace
       .mockRejectedValueOnce(networkError)
-      .mockResolvedValueOnce({ id: 'wishlist-2', ...input });
+      .mockResolvedValueOnce(created);
 
     let caught;
     await act(async () => {
@@ -677,21 +678,118 @@ describe('AppProvider actions', () => {
       wishlistError: networkError,
     });
 
-    const refreshError = new AppError(ERROR_CODES.network);
-    api.getWishlist.mockRejectedValueOnce(refreshError);
+    // 쓰기 실패는 재시도할 수 있어야 한다 — in-flight 키가 풀려 있다.
+    const latest = [...RESTORED_WISHLIST, created];
+    api.getWishlist.mockResolvedValue(latest);
     await act(async () => {
-      caught = await appState.createWishlistPlace(input).catch((error) => error);
+      await appState.createWishlistPlace(input);
     });
-    expect(caught).toBe(refreshError);
-    expect(appState.wishlist).toEqual(RESTORED_WISHLIST);
+    expect(api.createWishlistPlace).toHaveBeenCalledTimes(2);
+    expect(appState.wishlist).toEqual(latest);
+    expect(appState.wishlistStatus).toBe('ready');
+  });
 
-    const latest = [...RESTORED_WISHLIST, { id: 'wishlist-2', ...input }];
+  it('쓰기가 성공한 뒤 조회만 실패하면 쓰기 결과를 돌려주고 목록 오류로만 알린다', async () => {
+    await renderReadyProvider();
+    const input = Object.freeze({ provider: 'manual', name: '새 장소' });
+    const created = { id: 'wishlist-2', ...input };
+    const refreshError = new AppError(ERROR_CODES.network);
+    api.createWishlistPlace.mockResolvedValue(created);
+    api.getWishlist.mockRejectedValueOnce(refreshError);
+
+    let settled;
+    await act(async () => {
+      settled = await appState
+        .createWishlistPlace(input)
+        .catch((error) => ({ rejectedWith: error }));
+    });
+
+    // 행은 이미 들어갔다. 여기서 reject하면 화면이 쓰기 실패로 읽고, 그 재시도가 같은
+    // 쓰기를 반복한다 — repository에 멱등키·유일성 규칙이 없어 행이 중복된다.
+    expect(settled).toEqual(created);
+    expect(api.createWishlistPlace).toHaveBeenCalledTimes(1);
+    // 조회 실패는 기존 목록 오류(직전 목록 유지) 경로로만 알린다.
+    expect(appState).toMatchObject({
+      wishlist: RESTORED_WISHLIST,
+      wishlistStatus: 'error',
+      wishlistError: refreshError,
+    });
+
+    // 목록 재시도는 조회만 한다 — 쓰기를 다시 보내지 않는다.
+    const latest = [...RESTORED_WISHLIST, created];
     api.getWishlist.mockResolvedValue(latest);
     await act(async () => {
       await appState.retryWishlist();
     });
     expect(appState.wishlist).toEqual(latest);
     expect(appState.wishlistStatus).toBe('ready');
+    expect(api.createWishlistPlace).toHaveBeenCalledTimes(1);
+  });
+
+  it('수정·삭제도 성공한 뒤 조회만 실패하면 쓰기 결과를 돌려주고 다시 쓰지 않는다', async () => {
+    await renderReadyProvider();
+    const updated = { ...RESTORED_WISHLIST[0], name: '변경 장소' };
+    api.updateWishlistPlace.mockResolvedValue(updated);
+    api.deleteWishlistPlace.mockResolvedValue({ id: 'wishlist-1' });
+    api.getWishlist.mockRejectedValue(new AppError(ERROR_CODES.network));
+
+    let updateSettled;
+    await act(async () => {
+      updateSettled = await appState
+        .updateWishlistPlace('wishlist-1', { name: '변경 장소' })
+        .catch((error) => ({ rejectedWith: error }));
+    });
+    expect(updateSettled).toEqual(updated);
+    expect(api.updateWishlistPlace).toHaveBeenCalledTimes(1);
+
+    let deleteSettled;
+    await act(async () => {
+      deleteSettled = await appState
+        .deleteWishlistPlace('wishlist-1')
+        .catch((error) => ({ rejectedWith: error }));
+    });
+    expect(deleteSettled).toEqual({ id: 'wishlist-1' });
+    expect(api.deleteWishlistPlace).toHaveBeenCalledTimes(1);
+    expect(appState.wishlistStatus).toBe('error');
+    expect(appState.wishlist).toEqual(RESTORED_WISHLIST);
+  });
+
+  it('기록만 다시 읽는 재시도를 노출하고 부트스트랩 로딩으로 화면을 내리지 않는다', async () => {
+    await renderReadyProvider();
+    const refreshed = [...RESTORED_RECORDS, { id: 'record-2', placeName: '새 장소' }];
+    api.getRecords.mockResolvedValue(refreshed);
+
+    await act(async () => {
+      await appState.retryRecords();
+    });
+
+    expect(appState.records).toEqual(refreshed);
+    // 라우트가 유지되어야 한다 — bootstrap 상태와 커플 조회를 건드리지 않는다.
+    expect(appState.bootstrapStatus).toBe('ready');
+    expect(appState.ready).toBe(true);
+    expect(api.getCouple).toHaveBeenCalledTimes(1);
+
+    // 호출부가 인자를 넘겨도(PlaceDetail은 활성 사진을 넘긴다) epoch guard에 걸려
+    // 조용히 건너뛰지 않아야 한다.
+    await act(async () => {
+      await appState.retryRecords({ id: 'photo-1' });
+    });
+    expect(api.getRecords).toHaveBeenCalledTimes(3);
+  });
+
+  it('기록 다시 읽기 실패는 호출부가 처리하도록 reject하고 마지막 목록을 유지한다', async () => {
+    await renderReadyProvider();
+    const networkError = new AppError(ERROR_CODES.network);
+    api.getRecords.mockRejectedValueOnce(networkError);
+
+    let caught;
+    await act(async () => {
+      caught = await appState.retryRecords().catch((error) => error);
+    });
+
+    expect(caught).toBe(networkError);
+    expect(appState.records).toEqual(RESTORED_RECORDS);
+    expect(appState.bootstrapStatus).toBe('ready');
   });
 
   it('연결 해제 성공은 서버 응답 직후 커플·기록·가고 싶은 곳을 지우고 route guard 준비 상태를 유지한다', async () => {

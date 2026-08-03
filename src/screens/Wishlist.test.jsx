@@ -252,6 +252,32 @@ describe('Wishlist CRUD actions', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('추가가 성공한 뒤 목록 조회만 실패하면 stale 안내만 보여주고 추가를 다시 쓰지 않는다', async () => {
+    const user = userEvent.setup();
+    // 고친 스토어의 관측 상태: 쓰기는 resolve하고, 뒤이은 조회 실패는 wishlistStatus
+    // 오류(직전 목록 유지)로만 남는다. 여기서 추가 재시도를 노출하면 멱등키가 없어
+    // 같은 행이 한 번 더 들어간다.
+    renderWishlist({
+      state: { intent: 'wishlist-add', place: PLACE },
+      appOverride: {
+        wishlistStatus: 'error',
+        wishlistError: new AppError(ERROR_CODES.network),
+      },
+    });
+
+    await waitFor(() => expect(app.createWishlistPlace).toHaveBeenCalledTimes(1));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('최신 목록을 확인하지 못했어요');
+    expect(alert).not.toHaveTextContent('장소를 추가하지 못했어요');
+    expect(screen.queryByRole('button', { name: '추가 다시 시도' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '목록 다시 시도' }));
+
+    expect(app.retryWishlist).toHaveBeenCalledTimes(1);
+    expect(app.createWishlistPlace).toHaveBeenCalledTimes(1);
+  });
+
   it('변경 실패 시 공유 목록과 새 장소를 보존하고 그 변경만 재시도한다', async () => {
     const user = userEvent.setup();
     const firstUpdate = deferred();
