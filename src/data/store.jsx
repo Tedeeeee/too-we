@@ -62,8 +62,11 @@ export function AppProvider({ children }) {
   const [photoDeletesByRecord, setPhotoDeletesByRecord] = useState({});
   const mountedRef = useRef(false);
   const bootstrapAttemptRef = useRef(0);
+  const recordsAttemptRef = useRef(0);
   const wishlistAttemptRef = useRef(0);
   const sharedDataEpochRef = useRef(0);
+  const successfulBootstrapRef = useRef(false);
+  const coupleRef = useRef(couple);
   const recordsRef = useRef(records);
   const wishlistRef = useRef(wishlist);
   const photoUploadsRef = useRef(photoUploadsByRecord);
@@ -80,38 +83,33 @@ export function AppProvider({ children }) {
   photoUploadsRef.current = photoUploadsByRecord;
   photoDeletesRef.current = photoDeletesByRecord;
 
-  const bootstrap = useCallback(async () => {
-    const attempt = bootstrapAttemptRef.current + 1;
-    const epoch = sharedDataEpochRef.current;
-    bootstrapAttemptRef.current = attempt;
-    setBootstrapError(null);
-    setBootstrapStatus('loading');
+  const commitCouple = useCallback((nextCouple) => {
+    coupleRef.current = nextCouple;
+    setCouple(nextCouple);
+  }, []);
 
-    try {
-      const [nextCouple, nextRecords] = await Promise.all([
-        api.getCouple(),
-        api.getRecords(),
-      ]);
-      if (
-        !mountedRef.current ||
-        attempt !== bootstrapAttemptRef.current ||
-        epoch !== sharedDataEpochRef.current
-      ) return;
+  const advanceSharedDataEpoch = useCallback(() => {
+    sharedDataEpochRef.current += 1;
+    wishlistMutationInFlightRef.current.clear();
+    photoUploadInFlightRef.current.clear();
+    photoDeleteInFlightRef.current.clear();
+    profileMutationInFlightRef.current = null;
+    disconnectInFlightRef.current = null;
+    disconnectRetryOptionsRef.current = null;
+    return sharedDataEpochRef.current;
+  }, []);
 
-      setCouple(nextCouple);
-      recordsRef.current = nextRecords;
-      setRecords(nextRecords);
-      setBootstrapStatus('ready');
-    } catch (error) {
-      if (
-        !mountedRef.current ||
-        attempt !== bootstrapAttemptRef.current ||
-        epoch !== sharedDataEpochRef.current
-      ) return;
-
-      setBootstrapError(toAppError(error));
-      setBootstrapStatus('error');
-    }
+  const clearSharedData = useCallback((nextWishlistStatus = 'ready') => {
+    recordsRef.current = [];
+    wishlistRef.current = [];
+    photoUploadsRef.current = {};
+    photoDeletesRef.current = {};
+    setRecords([]);
+    setWishlist([]);
+    setWishlistStatus(nextWishlistStatus);
+    setWishlistError(null);
+    setPhotoUploadsByRecord({});
+    setPhotoDeletesByRecord({});
   }, []);
 
   const refreshWishlist = useCallback(async (expectedEpoch = sharedDataEpochRef.current) => {
@@ -148,6 +146,60 @@ export function AppProvider({ children }) {
     }
   }, []);
 
+  const bootstrap = useCallback(async () => {
+    const attempt = bootstrapAttemptRef.current + 1;
+    const recordsAttempt = recordsAttemptRef.current + 1;
+    const epoch = sharedDataEpochRef.current;
+    bootstrapAttemptRef.current = attempt;
+    recordsAttemptRef.current = recordsAttempt;
+    setBootstrapError(null);
+    setBootstrapStatus('loading');
+
+    try {
+      const [nextCouple, nextRecords] = await Promise.all([
+        api.getCouple(),
+        api.getRecords(),
+      ]);
+      if (
+        !mountedRef.current ||
+        attempt !== bootstrapAttemptRef.current ||
+        epoch !== sharedDataEpochRef.current
+      ) return;
+
+      const previousCoupleId = coupleRef.current?.coupleId ?? null;
+      const nextCoupleId = nextCouple?.coupleId ?? null;
+      const coupleChanged =
+        successfulBootstrapRef.current && previousCoupleId !== nextCoupleId;
+      let activeEpoch = epoch;
+
+      if (!nextCoupleId || coupleChanged) {
+        activeEpoch = advanceSharedDataEpoch();
+        clearSharedData(nextCoupleId ? 'loading' : 'ready');
+      }
+
+      successfulBootstrapRef.current = true;
+      commitCouple(nextCouple);
+      if (nextCoupleId && recordsAttempt === recordsAttemptRef.current) {
+        recordsRef.current = nextRecords;
+        setRecords(nextRecords);
+      }
+      setBootstrapStatus('ready');
+
+      if (coupleChanged && nextCoupleId) {
+        refreshWishlist(activeEpoch).catch(() => {});
+      }
+    } catch (error) {
+      if (
+        !mountedRef.current ||
+        attempt !== bootstrapAttemptRef.current ||
+        epoch !== sharedDataEpochRef.current
+      ) return;
+
+      setBootstrapError(toAppError(error));
+      setBootstrapStatus('error');
+    }
+  }, [advanceSharedDataEpoch, clearSharedData, commitCouple, refreshWishlist]);
+
   useEffect(() => {
     mountedRef.current = true;
     bootstrap();
@@ -156,6 +208,7 @@ export function AppProvider({ children }) {
     return () => {
       mountedRef.current = false;
       bootstrapAttemptRef.current += 1;
+      recordsAttemptRef.current += 1;
       wishlistAttemptRef.current += 1;
       sharedDataEpochRef.current += 1;
     };
@@ -165,8 +218,17 @@ export function AppProvider({ children }) {
   const retryWishlist = useCallback(() => refreshWishlist(), [refreshWishlist]);
 
   const refreshRecords = useCallback(async (expectedEpoch = sharedDataEpochRef.current) => {
+    if (!mountedRef.current || expectedEpoch !== sharedDataEpochRef.current) {
+      return recordsRef.current;
+    }
+    const attempt = recordsAttemptRef.current + 1;
+    recordsAttemptRef.current = attempt;
     const nextRecords = await api.getRecords();
-    if (mountedRef.current && expectedEpoch === sharedDataEpochRef.current) {
+    if (
+      mountedRef.current &&
+      attempt === recordsAttemptRef.current &&
+      expectedEpoch === sharedDataEpochRef.current
+    ) {
       recordsRef.current = nextRecords;
       setRecords(nextRecords);
     }
@@ -214,7 +276,11 @@ export function AppProvider({ children }) {
           }
         }
         return results;
-      })().finally(() => photoUploadInFlightRef.current.delete(recordId));
+      })().finally(() => {
+        if (photoUploadInFlightRef.current.get(recordId) === operation) {
+          photoUploadInFlightRef.current.delete(recordId);
+        }
+      });
       photoUploadInFlightRef.current.set(recordId, operation);
       return operation;
     },
@@ -245,7 +311,11 @@ export function AppProvider({ children }) {
           if (result.status === 'succeeded') await refreshRecords(epoch);
         }
         return result;
-      })().finally(() => photoDeleteInFlightRef.current.delete(key));
+      })().finally(() => {
+        if (photoDeleteInFlightRef.current.get(key) === operation) {
+          photoDeleteInFlightRef.current.delete(key);
+        }
+      });
       photoDeleteInFlightRef.current.set(key, operation);
       return operation;
     },
@@ -259,7 +329,7 @@ export function AppProvider({ children }) {
 
     const operation = (async () => {
       const nextCouple = await api.setMyName(name);
-      if (mountedRef.current && epoch === sharedDataEpochRef.current) setCouple(nextCouple);
+      if (mountedRef.current && epoch === sharedDataEpochRef.current) commitCouple(nextCouple);
       return nextCouple;
     })().finally(() => {
       if (profileMutationInFlightRef.current === operation) {
@@ -268,7 +338,7 @@ export function AppProvider({ children }) {
     });
     profileMutationInFlightRef.current = operation;
     return operation;
-  }, []);
+  }, [commitCouple]);
 
   const runWishlistMutation = useCallback(
     (key, mutation) => {
@@ -303,6 +373,7 @@ export function AppProvider({ children }) {
   const runDisconnect = useCallback((options) => {
     const pending = disconnectInFlightRef.current;
     if (pending) return pending;
+    const epoch = sharedDataEpochRef.current;
 
     const callerKey =
       options && typeof options === 'object' && typeof options.requestKey === 'string'
@@ -316,31 +387,17 @@ export function AppProvider({ children }) {
     const operation = (async () => {
       try {
         const result = await api.disconnectCouple(safeOptions);
-        if (mountedRef.current) {
-          sharedDataEpochRef.current += 1;
+        if (mountedRef.current && epoch === sharedDataEpochRef.current) {
+          advanceSharedDataEpoch();
           bootstrapAttemptRef.current += 1;
-          wishlistAttemptRef.current += 1;
-
-          recordsRef.current = [];
-          wishlistRef.current = [];
-          photoUploadsRef.current = {};
-          photoDeletesRef.current = {};
-          setCouple(null);
-          setRecords([]);
-          setWishlist([]);
-          setWishlistStatus('ready');
-          setWishlistError(null);
-          setPhotoUploadsByRecord({});
-          setPhotoDeletesByRecord({});
+          commitCouple(null);
+          clearSharedData();
           setBootstrapStatus('ready');
           setBootstrapError(null);
-
-          wishlistMutationInFlightRef.current.clear();
-          photoUploadInFlightRef.current.clear();
-          photoDeleteInFlightRef.current.clear();
-          profileMutationInFlightRef.current = null;
         }
-        disconnectRetryOptionsRef.current = null;
+        if (disconnectInFlightRef.current === operation) {
+          disconnectRetryOptionsRef.current = null;
+        }
         return result;
       } catch (error) {
         throw toAppError(error);
@@ -350,19 +407,19 @@ export function AppProvider({ children }) {
     });
     disconnectInFlightRef.current = operation;
     return operation;
-  }, []);
+  }, [advanceSharedDataEpoch, clearSharedData, commitCouple]);
 
   const actions = useMemo(
     () => ({
       async startNewCouple(options) {
         const epoch = sharedDataEpochRef.current;
         const nextCouple = await api.createCouple(options);
-        if (mountedRef.current && epoch === sharedDataEpochRef.current) setCouple(nextCouple);
+        if (mountedRef.current && epoch === sharedDataEpochRef.current) commitCouple(nextCouple);
       },
       async connectWithCode(code, options) {
         const epoch = sharedDataEpochRef.current;
         const nextCouple = await api.connectWithCode(code, options);
-        if (mountedRef.current && epoch === sharedDataEpochRef.current) setCouple(nextCouple);
+        if (mountedRef.current && epoch === sharedDataEpochRef.current) commitCouple(nextCouple);
       },
       setMyName(name) {
         return runMyNameUpdate(name);
@@ -370,12 +427,12 @@ export function AppProvider({ children }) {
       async completeOnboarding() {
         const epoch = sharedDataEpochRef.current;
         const nextCouple = await api.completeOnboarding();
-        if (mountedRef.current && epoch === sharedDataEpochRef.current) setCouple(nextCouple);
+        if (mountedRef.current && epoch === sharedDataEpochRef.current) commitCouple(nextCouple);
       },
       async reissueCoupleInvite(options) {
         const epoch = sharedDataEpochRef.current;
         const nextCouple = await api.reissueCoupleInvite(options);
-        if (mountedRef.current && epoch === sharedDataEpochRef.current) setCouple(nextCouple);
+        if (mountedRef.current && epoch === sharedDataEpochRef.current) commitCouple(nextCouple);
       },
       async saveFiveSecondRecord(input) {
         const epoch = sharedDataEpochRef.current;
@@ -450,6 +507,7 @@ export function AppProvider({ children }) {
     }),
     [
       recordForPhotoAction,
+      commitCouple,
       refreshRecords,
       runDisconnect,
       runMyNameUpdate,
