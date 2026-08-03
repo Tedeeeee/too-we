@@ -1,10 +1,11 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { palette, fonts, SEASONS } from '@/styles/tokens';
 import { etcSvg, flowerSvg, uiSvg } from '@assets/svg';
 import Placeholder from './Placeholder';
 import FlowerRating from './FlowerRating';
 import MaskIcon from './MaskIcon';
 import { formatRecordDate } from '@/data/format';
+import { flowerByKey } from '@/data/fixtures';
 
 // README 규칙: SpringStar는 lazy import (장식 요소, 초기 번들 제외)
 const SpringStar = lazy(() => import('@assets/icons/SpringStar'));
@@ -21,18 +22,60 @@ export default function PlaceDetail({
   couple,
   season = 'spring',
   photoIndex = 0,
-  photoCount = 0,
   onBack,
   onNextPhoto,
+  onRetryPhotos,
   onOpenPick,
   onOpenEdit,
 }) {
   const theme = SEASONS.find((s) => s.key === season) || SEASONS[0];
-  const myEntry = record.entries.find((e) => e.memberId === 'me');
-  const partnerEntry = record.entries.find((e) => e.memberId === 'partner');
+  const orderedPhotos = useMemo(
+    () => (Array.isArray(record.photos) ? record.photos : [])
+      .slice()
+      .sort((a, b) => Number(a?.order ?? a?.ordinal ?? 0) - Number(b?.order ?? b?.ordinal ?? 0)),
+    [record.photos],
+  );
+  const photoCount = orderedPhotos.length;
+  const activePhoto = orderedPhotos[Math.min(photoIndex, Math.max(photoCount - 1, 0))] ?? null;
+  const [photoFailed, setPhotoFailed] = useState(false);
+  const [photoRetryKey, setPhotoRetryKey] = useState(0);
+  const [photoRetrying, setPhotoRetrying] = useState(false);
+  const myEntry = record.entries?.find((e) => e.memberId === 'me') ?? {
+    memberId: 'me',
+    text: null,
+    rating: record.rating || 0,
+    readOnly: true,
+  };
+  const partnerEntry = record.entries?.find((e) => e.memberId === 'partner') ?? {
+    memberId: 'partner',
+    text: null,
+    rating: 0,
+    readOnly: true,
+  };
+  const flower = flowerByKey(record.flower);
+
+  useEffect(() => {
+    setPhotoFailed(false);
+    setPhotoRetrying(false);
+  }, [activePhoto?.id, activePhoto?.url]);
+
+  const retryActivePhoto = async () => {
+    if (photoRetrying) return;
+    setPhotoRetrying(true);
+    setPhotoFailed(false);
+    setPhotoRetryKey((value) => value + 1);
+    try {
+      await onRetryPhotos?.(activePhoto);
+    } catch {
+      setPhotoFailed(true);
+    } finally {
+      setPhotoRetrying(false);
+    }
+  };
 
   const memoCard = (entry, left, top) => (
     <div
+      aria-label={`${entry.member.name}의 기록 (읽기 전용)`}
       style={{
         position: 'absolute',
         left,
@@ -76,6 +119,21 @@ export default function PlaceDetail({
         activeColor={theme.flower}
         style={{ position: 'absolute', right: 16, top: 48 }}
       />
+      <span
+        style={{
+          position: 'absolute',
+          width: 1,
+          height: 1,
+          padding: 0,
+          margin: -1,
+          overflow: 'hidden',
+          clip: 'rect(0, 0, 0, 0)',
+          whiteSpace: 'nowrap',
+          border: 0,
+        }}
+      >
+        {entry.rating || 0}점
+      </span>
       <div
         style={{
           position: 'absolute',
@@ -88,7 +146,7 @@ export default function PlaceDetail({
           lineHeight: 1.5,
         }}
       >
-        {entry.text}
+        {entry.text || '한 줄 없음'}
       </div>
     </div>
   );
@@ -131,10 +189,47 @@ export default function PlaceDetail({
       {/* 계절 히어로 이미지 — 업로드 전 placeholder */}
       <div style={{ position: 'absolute', left: 0, top: 0, width: 402, height: 280 }}>
         <Placeholder
-          label={photoCount > 1 ? `장소 사진 ${photoIndex + 1}` : '장소 사진'}
+          src={activePhoto?.url}
+          alt={activePhoto ? `${record.placeName} 사진 ${photoIndex + 1}/${photoCount}` : ''}
+          label={activePhoto ? '사진을 불러오지 못했어요' : '아직 사진이 없어요'}
+          retryKey={photoRetryKey}
+          onImageError={() => setPhotoFailed(true)}
           width={402}
           height={280}
         />
+        {(photoFailed || (activePhoto && !activePhoto.url)) && (
+          <div
+            role="alert"
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: 112,
+              width: 402,
+              textAlign: 'center',
+              fontFamily: fonts.hand,
+              color: palette.text,
+            }}
+          >
+            <span style={{ display: 'block' }}>사진을 불러오지 못했어요.</span>
+            <button
+              type="button"
+              aria-label="이 사진 다시 불러오기"
+              disabled={photoRetrying}
+              onClick={retryActivePhoto}
+              style={{
+                marginTop: 8,
+                padding: '6px 12px',
+                borderRadius: 999,
+                background: palette.card,
+                color: palette.olive,
+                fontFamily: fonts.sans,
+                cursor: 'pointer',
+              }}
+            >
+              {photoRetrying ? '불러오는 중…' : '다시 시도'}
+            </button>
+          </div>
+        )}
         {season === 'spring' && (
           <Suspense fallback={null}>
             <SpringStar size={22} style={{ position: 'absolute', right: 22, top: 96, opacity: 0.9 }} />
@@ -286,11 +381,11 @@ export default function PlaceDetail({
           cursor: 'pointer',
         }}
       >
-        꽃갈피 추가
+        {flower ? `${flower.name} 꽃갈피` : '꽃갈피 추가'}
       </div>
       {/* 태그 */}
       <div style={{ position: 'absolute', left: 22, top: 296, display: 'flex', flexDirection: 'row', gap: 12 }}>
-        {record.tags.slice(0, 1).map((tag, i) => (
+        {(Array.isArray(record.tags) ? record.tags : []).map((tag, i) => (
           <div
             key={i}
             style={{
@@ -327,18 +422,10 @@ export default function PlaceDetail({
         </div>
       </div>
       {/* 메모(한 줄) 카드 */}
-      {myEntry && (
-        <>
-          {avatar(couple.me, 26, 351)}
-          {memoCard({ ...myEntry, member: couple.me }, 98, 351)}
-        </>
-      )}
-      {partnerEntry && (
-        <>
-          {memoCard({ ...partnerEntry, member: couple.partner }, 26, 563)}
-          {avatar(couple.partner, 328, 563)}
-        </>
-      )}
+      {avatar(couple?.me ?? { name: '나', initial: '' }, 26, 351)}
+      {memoCard({ ...myEntry, member: couple?.me ?? { name: '나' } }, 98, 351)}
+      {memoCard({ ...partnerEntry, member: couple?.partner ?? { name: '짝궁' } }, 26, 563)}
+      {avatar(couple?.partner ?? { name: '짝궁', initial: '' }, 328, 563)}
       <div
         style={{
           position: 'absolute',

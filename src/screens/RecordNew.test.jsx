@@ -43,6 +43,11 @@ function renderRecord(state, saveFiveSecondRecord = vi.fn(), appOverrides = {}) 
     ready: true,
     saveFiveSecondRecord,
     updateRecord: vi.fn(),
+    addVisitPhotos: vi.fn().mockResolvedValue([]),
+    deleteVisitPhoto: vi.fn(),
+    retryDeleteVisitPhoto: vi.fn(),
+    photoUploadsByRecord: {},
+    photoDeletesByRecord: {},
     ...appOverrides,
   });
 
@@ -360,5 +365,18 @@ describe('RecordNew pending completion variant', () => {
 
     expect(saveFiveSecondRecord).not.toHaveBeenCalled();
     expect(updateRecord).toHaveBeenCalledWith('visit-pending', { text: '', rating: 0, tags: [] });
+  });
+
+  it('대기 기록에서 사진 파일을 선택하면 승인된 압축 업로드 액션에 원본 파일을 맡긴다', async () => {
+    const addVisitPhotos = vi.fn().mockResolvedValue([
+      { clientId: 'upload-1', file: new File(['a'], 'a.jpg', { type: 'image/jpeg' }), status: 'succeeded', photo: { id: 'photo-1', ownedByMe: true } },
+    ]);
+    useRecord.mockReturnValue(pendingRecord({ photos: [] }));
+    renderRecord({ recordId: 'visit-pending' }, vi.fn(), { addVisitPhotos });
+    const file = new File(['a'], 'a.jpg', { type: 'image/jpeg' });
+
+    fireEvent.change(screen.getByLabelText('사진 추가'), { target: { files: [file] } });
+
+    await waitFor(() => expect(addVisitPhotos).toHaveBeenCalledWith('visit-pending', [file]));
   });
 });

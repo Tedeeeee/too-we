@@ -49,6 +49,10 @@ export default function MapSelect() {
   const geolocationRequestedRef = useRef(false);
 
   const isNewRecordIntent = routeLocation.state?.intent === 'new-record';
+  const editRecordId = routeLocation.state?.intent === 'edit-record-place'
+    && typeof routeLocation.state?.recordId === 'string'
+    ? routeLocation.state.recordId
+    : null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -167,9 +171,16 @@ export default function MapSelect() {
   const selectPlace = (place) => {
     if (!place) return;
     setSelectedPlaceId(place.id);
+    const snapshot = Object.freeze({ ...place });
+    if (editRecordId) {
+      navigate(`/place/${editRecordId}/edit`, {
+        replace: true,
+        state: Object.freeze({ place: snapshot }),
+      });
+      return;
+    }
     if (!isNewRecordIntent) return;
 
-    const snapshot = Object.freeze({ ...place });
     navigate('/record', {
       state: Object.freeze({
         place: snapshot,

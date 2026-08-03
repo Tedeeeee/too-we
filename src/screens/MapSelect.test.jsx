@@ -81,15 +81,16 @@ function Destination() {
   return <div>새 기록 화면</div>;
 }
 
-function renderMap({ intent, strict = false } = {}) {
+function renderMap({ intent, recordId, strict = false } = {}) {
   const entry = intent
-    ? { pathname: '/map', state: { intent } }
+    ? { pathname: '/map', state: { intent, ...(recordId ? { recordId } : {}) } }
     : { pathname: '/map' };
   const content = (
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/map" element={<MapSelect />} />
         <Route path="/record" element={<Destination />} />
+        <Route path="/place/:recordId/edit" element={<Destination />} />
       </Routes>
     </MemoryRouter>
   );
@@ -289,6 +290,21 @@ describe('MapSelect selection and route intent', () => {
       category: PLACE.category,
       place: PLACE,
     });
+    expect(destinationLocation.state.place).not.toBe(PLACE);
+    expect(Object.isFrozen(destinationLocation.state.place)).toBe(true);
+  });
+
+  it('edit-record-place intent에서 선택한 전체 스냅샷만 원래 수정 화면으로 돌려준다', async () => {
+    const user = userEvent.setup();
+    api.getNearbyPlaces.mockResolvedValue([{ ...PLACE }]);
+    renderMap({ intent: 'edit-record-place', recordId: 'visit-1' });
+    await submitKeyword(user, '성수 카페');
+
+    await user.click(await screen.findByRole('button', { name: resultName(PLACE) }));
+
+    expect(await screen.findByText('새 기록 화면')).toBeInTheDocument();
+    expect(destinationLocation.pathname).toBe('/place/visit-1/edit');
+    expect(destinationLocation.state).toEqual({ place: PLACE });
     expect(destinationLocation.state.place).not.toBe(PLACE);
     expect(Object.isFrozen(destinationLocation.state.place)).toBe(true);
   });
