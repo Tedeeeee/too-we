@@ -53,6 +53,40 @@ main
 - Claude는 다른 Claude 브랜치를 병합하지 않는다.
 - 통합된 worktree는 다음 Wave 전에 닫거나 보관한다.
 
+## 구현 작업자 라우팅
+
+- 모든 root, Wave, 구현 task는 Claude를 최초 구현 작업자로 전제한다. 사용량 소진 증거가 생기기 전에 task 제목·명세·Run 목표에 Codex 구현을 미리 지정하지 않는다.
+- Codex는 구현 dispatch 직전에 Claude Code 계정이나 런타임이 제공하는 읽기 전용 사용량 상태를 확인한다. 확인 과정에서 토큰, 키 또는 계정 비밀정보를 기록하지 않는다.
+- 사용 가능하면 Claude로 dispatch한다. 사용량 상태를 확인할 수 없거나 결과가 불명확해도 소진으로 추정하지 않고 Claude를 먼저 시도한다.
+- 사전 확인에서 Claude 계정 전체의 사용량 소진이 명확히 확인되거나, 아래 Fable→Opus 라우팅까지 거친 뒤에도 계정 수준의 사용량 크레딧·결제·rate-limit 오류로 중단된 경우에만 Codex fallback을 허용한다.
+- 일시적 과부하나 서비스 오류는 Codex fallback 사유가 아니다. 이런 경우에는 아래 Claude 모델 라우팅을 먼저 따른다.
+
+### 증거 기반 Codex fallback
+
+- fallback 기록에는 `originalTaskId`, `originalDispatchId`, 확인 출처, 오류 종류, `observedAt`, 완료된 작업과 남은 범위를 포함한다. 사전 확인으로 Claude Dispatch를 만들지 않았다면 `originalDispatchId`에 그 사실을 기록한다.
+- 기존 Run, Task, worktree, 브랜치와 완료된 변경을 그대로 보존한다. 사용량 소진만을 이유로 새 Run, 새 Task 또는 새 worktree를 만들거나 이미 끝난 구현 단계를 반복하지 않는다.
+- Codex 구현 작업자는 기존 작업의 남은 범위만 이어받는다. 시작 전에 기존 Claude 터미널을 정지하거나 유휴 상태로 만들어 같은 worktree를 동시에 편집하지 않게 한다.
+- Codex 구현 작업자와 Codex 코디네이터·리뷰어는 각각 별도 터미널로 분리한다. 구현 작업자가 보낸 `worker_done`은 별도 코디네이터가 diff와 검증 결과를 다시 확인한다.
+- fallback 증거가 없거나 오류 의미가 모호하면 Codex로 전환하지 않고 사용자 decision gate를 연다.
+- Codex fallback 결과도 동일한 파일 소유권, 테스트, 빌드, 리뷰 및 통합 게이트를 통과한다.
+
+## Claude 모델 라우팅
+
+- 모든 새 Claude 구현 작업자는 프로젝트 설정인 `.claude/settings.json`에 따라 Fable로 시작한다.
+- Fable이 과부하되거나 일시적으로 사용할 수 없으면 Claude Code의 `fallbackModel` 설정으로 해당 요청을 Opus에서 재시도한다.
+- 일반 fallback은 한 요청에만 적용되며, 다음 요청에서는 Fable을 다시 우선 시도한다.
+- 사용량 크레딧, 결제 또는 rate-limit 오류는 Claude Code의 일반 fallback을 작동시키지 않는다.
+- Fable 작업자가 사용량 제한으로 중단되면 해당 Orca task를 실패 처리하거나 새 worktree를 만들지 않는다.
+- Codex는 기존 worktree, 브랜치, task 상태와 완료된 변경을 보존하고, 막힌 Fable 세션을 정지하거나 유휴 상태로 만든 뒤 같은 worktree에서 다음 명령으로 Opus 세션을 시작한다.
+
+```bash
+claude --model opus --continue
+```
+
+- Codex는 미완료 task를 Opus 세션에 다시 dispatch하고 이미 끝난 구현 단계를 반복하지 않도록 명세에 현재 진행 상태를 포함한다.
+- Opus로 완료된 결과도 동일한 `worker_done`과 Codex 리뷰 게이트를 통과해야 한다.
+- Fable과 Opus를 모두 사용할 수 없으면 위의 증거 기반 Codex fallback 게이트를 적용한다. 사용량 소진 증거가 불명확하면 다른 모델로 임의 전환하지 않고 decision gate로 사용자에게 알린다.
+
 ## 작업 명세 필수 항목
 
 모든 Orca 구현 task는 다음 정보를 포함한다.
