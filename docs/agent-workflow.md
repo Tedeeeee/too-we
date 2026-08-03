@@ -70,6 +70,52 @@ main
 - fallback 증거가 없거나 오류 의미가 모호하면 Codex로 전환하지 않고 사용자 decision gate를 연다.
 - Codex fallback 결과도 동일한 파일 소유권, 테스트, 빌드, 리뷰 및 통합 게이트를 통과한다.
 
+### 저장소 라우팅 가드
+
+위 규칙은 저장소 가드로도 강제된다. Codex 세션이 구현 경로를 바꾸면 테스트·빌드·커밋이
+살아 있는 fallback grant를 요구한다. Claude와 사람 세션, 그리고 `docs/**/*.md`와 루트
+`AGENTS.md` / `CLAUDE.md` / `README.md`만 바꾸는 Codex 세션은 그대로 통과한다.
+
+설치는 통합 worktree에서 한 번만 하면 된다. 버전 관리되는 `.githooks/` 템플릿 두 개와
+검증기 런타임 세 개(`verify-agent-routing.mjs`, `agent-routing-grant.mjs`,
+`agent-routing-policy.mjs`)를 `<git-common-dir>/orca-routing-hooks/`로 복사하고 공유
+`core.hooksPath`를 그 절대 경로로 맞추므로, 기존·새 worktree가 모두 같은 사본을 쓴다.
+배포본은 작업 트리 밖이라 커밋으로 바꿀 수 없다.
+
+**훅은 작업 트리의 `scripts/`를 실행하지 않는다.** 실행하면 Codex가 같은 커밋에서 검증기를
+`process.exit(0)`으로 바꿔 가드를 통과할 수 있다. 대신 배포된 사본만 실행하며, 배포는 다섯
+파일이 모두 Git이 추적하는 일반 파일이고 HEAD 기준 staged·unstaged 변경이 없을 때만 이뤄진다.
+따라서 **가드 코드를 고쳤으면 커밋한 뒤 다시 설치해야 반영된다**(`npm install`의 postinstall도
+같은 일을 한다). `pretest`·`prebuild`는 편의 검사이므로 작업 트리 사본을 그대로 쓴다.
+
+```bash
+npm run agent-routing:install   # 훅 배포 (postinstall에서도 자동 실행, 반복 실행 안전)
+npm run agent-routing:verify    # 현재 변경을 수동 검사
+npm run agent-routing:test      # 가드 자체 테스트
+```
+
+grant는 커밋되지 않고 `<git-common-dir>/orca-routing-grants/<terminal>.json`에 저장된다.
+`create`와 `finalize`는 **주 통합 worktree의 통합 브랜치에서, 그 Run의 코디네이터
+터미널만** 실행할 수 있다. `orca orchestration run-show --id <run> --json`의
+`coordinator_handle`이 현재 세션의 `ORCA_TERMINAL_HANDLE`과 정확히 같아야 하고, 코디네이터
+자신에게는 발급할 수 없다. 확인이 안 되면 발급하지 않는다.
+
+```bash
+node scripts/agent-routing-grant.mjs create \
+  --terminal <term> --task <task> --run <run> \
+  --evidence-source read-only-usage-check|claude-response-classification \
+  --observed-at <iso> --expires-at <iso> \
+  --allowed-path <repo-relative-path> --remaining-scope "<남은 범위>"
+
+node scripts/agent-routing-grant.mjs finalize --terminal <term> --dispatch <ctx>
+node scripts/agent-routing-grant.mjs status   --terminal <term>
+```
+
+`create`는 provisional 상태만 만든다. Task를 dispatch한 뒤 `finalize`로 살아 있는
+Dispatch ID·Run·담당 terminal을 묶어야 가드가 열린다. 유효 기간은 최대 60분이고, grant는
+staged tree 하나에 예약된 뒤 커밋 시 소진되어 재사용되지 않는다. `--remaining-scope`에는
+토큰·키·원시 오류 본문을 넣을 수 없다(패턴 검사로 거부된다).
+
 ## Claude 모델 라우팅
 
 - 모든 새 Claude 구현 작업자는 프로젝트 설정인 `.claude/settings.json`에 따라 Fable로 시작한다.

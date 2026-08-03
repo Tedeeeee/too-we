@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# 구현 작업자 라우팅 가드 — staged 경로를 검사한다.
+#
+# 설치: npm run agent-routing:install
+#   이 파일은 템플릿이다. 설치 스크립트가 검증기와 그 의존성(policy·grant)까지 함께
+#   <git-common-dir>/orca-routing-hooks/ 로 복사하고 core.hooksPath를 그 절대 경로로 맞춘다.
+#
+# 실행되는 코드는 **전부 배포된 사본**이다. 작업 트리의 `scripts/`를 실행하면 Codex가
+# 그 파일을 고쳐(예: verify-agent-routing.mjs를 process.exit(0)으로) 같은 커밋에서 가드를
+# 무력화할 수 있다. 배포 디렉터리는 작업 트리 밖이라 커밋으로 바꿀 수 없고, 배포된 검증기의
+# `./agent-routing-policy.mjs` / `./agent-routing-grant.mjs` import도 같은 디렉터리 안에서
+# 해석되므로 의존성까지 고정된다.
+#
+# common 디렉터리나 배포된 검증기를 찾지 못하면 통과시키지 않고 exit 1 한다. 가드가 조용히
+# 열리는 것보다 커밋이 시끄럽게 막히는 쪽이 안전하다. 복구는 `npm run agent-routing:install`이다.
+
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+if [ -z "$common" ]; then
+  echo "[agent-routing] Git common 디렉터리를 확인할 수 없어 커밋을 막는다." >&2
+  exit 1
+fi
+
+verifier="$common/orca-routing-hooks/verify-agent-routing.mjs"
+if [ ! -f "$verifier" ]; then
+  echo "[agent-routing] 배포된 검증기가 없어 커밋을 막는다: $verifier" >&2
+  echo "[agent-routing] npm run agent-routing:install 을 실행한다." >&2
+  exit 1
+fi
+
+exec node "$verifier" --staged
