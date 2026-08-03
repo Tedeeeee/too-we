@@ -224,6 +224,57 @@ describe('AppProvider bootstrap', () => {
     expect(appState.records).toEqual(newerRecords);
     expect(appState.bootstrapStatus).toBe('ready');
   });
+
+  it('복원된 세션에 활성 커플이 없으면 공유 응답 데이터를 폐기한다', async () => {
+    api.getCouple.mockResolvedValue(NO_COUPLE);
+    api.getRecords.mockResolvedValue(RESTORED_RECORDS);
+    api.getWishlist.mockResolvedValue(RESTORED_WISHLIST);
+
+    renderProvider();
+
+    await waitFor(() => expect(appState.ready).toBe(true));
+    await waitFor(() => expect(appState.wishlistStatus).toBe('ready'));
+    expect(appState.couple).toEqual(NO_COUPLE);
+    expect(appState.records).toEqual([]);
+    expect(appState.wishlist).toEqual([]);
+  });
+
+  it('새로고침으로 연결 해제를 발견하면 이전 커플 epoch을 폐기한다', async () => {
+    api.getCouple.mockResolvedValue(RESTORED_COUPLE);
+    api.getRecords.mockResolvedValue(RESTORED_RECORDS);
+    api.getWishlist.mockResolvedValue(RESTORED_WISHLIST);
+    renderProvider();
+    await waitFor(() => expect(appState.ready).toBe(true));
+    await waitFor(() => expect(appState.wishlistStatus).toBe('ready'));
+
+    const pendingName = deferred();
+    const staleCouple = {
+      ...RESTORED_COUPLE,
+      me: { ...RESTORED_COUPLE.me, name: 'late stale name' },
+    };
+    api.setMyName.mockReturnValue(pendingName.promise);
+    api.getCouple.mockResolvedValue(NO_COUPLE);
+    api.getRecords.mockResolvedValue(RESTORED_RECORDS);
+
+    let nameOperation;
+    await act(async () => {
+      nameOperation = appState.setMyName('late stale name');
+      await appState.retryBootstrap();
+    });
+
+    expect(appState.couple).toEqual(NO_COUPLE);
+    expect(appState.records).toEqual([]);
+    expect(appState.wishlist).toEqual([]);
+
+    await act(async () => {
+      pendingName.resolve(staleCouple);
+      await nameOperation;
+    });
+
+    expect(appState.couple).toEqual(NO_COUPLE);
+    expect(appState.records).toEqual([]);
+    expect(appState.wishlist).toEqual([]);
+  });
 });
 
 describe('AppProvider actions', () => {
@@ -382,6 +433,86 @@ describe('AppProvider actions', () => {
     expect(api.saveFiveSecondRecord).toHaveBeenNthCalledWith(1, input);
     expect(api.saveFiveSecondRecord).toHaveBeenNthCalledWith(2, input);
     expect(appState.records).toEqual(convergedRecords);
+  });
+
+  it('겹친 기록 조회가 역순으로 끝나도 가장 새 결과를 유지한다', async () => {
+    await renderReadyProvider();
+    const olderRefresh = deferred();
+    const newerRecords = [
+      ...RESTORED_RECORDS,
+      { id: 'record-newer', placeName: 'newer place' },
+    ];
+    api.saveFiveSecondRecord
+      .mockResolvedValueOnce({ id: 'record-older' })
+      .mockResolvedValueOnce({ id: 'record-newer' });
+    api.getRecords
+      .mockReturnValueOnce(olderRefresh.promise)
+      .mockResolvedValueOnce(newerRecords);
+
+    let olderOperation;
+    await act(async () => {
+      olderOperation = appState.saveFiveSecondRecord({
+        place: { name: 'older place' },
+        requestKey: 'older-intent',
+      });
+      await appState.saveFiveSecondRecord({
+        place: { name: 'newer place' },
+        requestKey: 'newer-intent',
+      });
+    });
+
+    expect(appState.records).toEqual(newerRecords);
+
+    await act(async () => {
+      olderRefresh.resolve([{ id: 'record-older', placeName: 'older place' }]);
+      await olderOperation;
+    });
+
+    expect(appState.records).toEqual(newerRecords);
+  });
+
+  it('연결 해제 뒤 느린 쓰기가 새 커플의 기록 복원을 무효화하지 않는다', async () => {
+    await renderReadyProvider();
+    const pendingWrite = deferred();
+    const pendingNewCouple = deferred();
+    const newCouple = { ...RESTORED_COUPLE, coupleId: 'couple-2' };
+    const newRecords = [{ id: 'record-new', placeName: 'new couple place' }];
+    api.saveFiveSecondRecord.mockReturnValue(pendingWrite.promise);
+    api.disconnectCouple.mockResolvedValue({ disconnected: true, coupleId: 'couple-1' });
+
+    let staleWriteOperation;
+    act(() => {
+      staleWriteOperation = appState.saveFiveSecondRecord({
+        place: { name: 'old couple place' },
+        requestKey: 'old-couple-write',
+      });
+    });
+
+    await act(async () => {
+      await appState.disconnectCouple({ requestKey: 'disconnect-old-couple' });
+    });
+
+    api.getCouple.mockReturnValueOnce(pendingNewCouple.promise);
+    api.getRecords
+      .mockResolvedValueOnce(newRecords)
+      .mockResolvedValueOnce([{ id: 'record-stale', placeName: 'old couple place' }]);
+    let bootstrapOperation;
+    act(() => {
+      bootstrapOperation = appState.retryBootstrap();
+    });
+
+    await act(async () => {
+      pendingWrite.resolve({ id: 'record-stale' });
+      await staleWriteOperation;
+    });
+
+    await act(async () => {
+      pendingNewCouple.resolve(newCouple);
+      await bootstrapOperation;
+    });
+
+    expect(appState.couple).toEqual(newCouple);
+    expect(appState.records).toEqual(newRecords);
   });
 
   it('승인된 초대 재발급 facade를 action으로 노출하고 성공 결과만 반영한다', async () => {
@@ -624,6 +755,75 @@ describe('AppProvider actions', () => {
     await expect(second).resolves.toMatchObject({ disconnected: true });
   });
 
+  it('복원이 연결 해제를 확인한 뒤 늦은 해제 응답이 새 커플을 지우지 않는다', async () => {
+    await renderReadyProvider();
+    const pendingDisconnect = deferred();
+    const pendingNewDisconnect = deferred();
+    const newCouple = { ...RESTORED_COUPLE, coupleId: 'couple-2' };
+    api.disconnectCouple
+      .mockReturnValueOnce(pendingDisconnect.promise)
+      .mockReturnValueOnce(pendingNewDisconnect.promise);
+
+    let oldDisconnectOperation;
+    act(() => {
+      oldDisconnectOperation = appState.disconnectCouple({ requestKey: 'old-disconnect' });
+    });
+
+    await act(async () => {
+      api.getCouple.mockResolvedValue(NO_COUPLE);
+      api.getRecords.mockResolvedValue([]);
+      await appState.retryBootstrap();
+      api.createCouple.mockResolvedValue(newCouple);
+      await appState.startNewCouple({ requestKey: 'new-couple' });
+    });
+    expect(appState.couple).toEqual(newCouple);
+
+    let newDisconnectOperation;
+    act(() => {
+      newDisconnectOperation = appState.disconnectCouple({ requestKey: 'new-disconnect' });
+    });
+    expect(api.disconnectCouple).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      pendingDisconnect.resolve({ disconnected: true, coupleId: 'couple-1' });
+      await oldDisconnectOperation;
+    });
+
+    expect(appState.couple).toEqual(newCouple);
+
+    await act(async () => {
+      pendingNewDisconnect.resolve({ disconnected: true, coupleId: 'couple-2' });
+      await newDisconnectOperation;
+    });
+    expect(appState.couple).toBeNull();
+  });
+
+  it('복원이 연결 해제를 확인하면 이전 커플의 재시도 키를 새 epoch에 재사용하지 않는다', async () => {
+    await renderReadyProvider();
+    const networkError = new AppError(ERROR_CODES.network);
+    api.disconnectCouple.mockRejectedValueOnce(networkError);
+
+    await expect(appState.disconnectCouple()).rejects.toBe(networkError);
+    const oldOptions = api.disconnectCouple.mock.calls[0][0];
+
+    await act(async () => {
+      api.getCouple.mockResolvedValue(NO_COUPLE);
+      api.getRecords.mockResolvedValue([]);
+      await appState.retryBootstrap();
+    });
+
+    const newCouple = { ...RESTORED_COUPLE, coupleId: 'couple-2' };
+    api.createCouple.mockResolvedValue(newCouple);
+    api.disconnectCouple.mockResolvedValue({ disconnected: true, coupleId: 'couple-2' });
+    await act(async () => {
+      await appState.startNewCouple({ requestKey: 'new-couple' });
+      await appState.disconnectCouple();
+    });
+
+    const newOptions = api.disconnectCouple.mock.calls[1][0];
+    expect(newOptions.requestKey).not.toBe(oldOptions.requestKey);
+  });
+
   it('연결 해제 뒤 늦게 끝난 이름 저장 응답이 활성 커플을 메모리에 되살리지 않는다', async () => {
     await renderReadyProvider();
     const pendingName = deferred();
@@ -783,6 +983,53 @@ describe('AppProvider actions', () => {
     expect(appState.photoUploadsByRecord['record-1']).toEqual(failed);
   });
 
+  it('이전 업로드 정리가 같은 기록 id의 새 epoch 업로드를 풀지 않는다', async () => {
+    const oldRecord = { id: 'record-1', coupleId: 'couple-1', photos: [] };
+    const newRecord = { id: 'record-1', coupleId: 'couple-2', photos: [] };
+    await renderReadyProvider([oldRecord]);
+    const oldPending = deferred();
+    const newPending = deferred();
+    const unexpectedPending = deferred();
+    const oldFile = new File(['old'], 'old.jpg', { type: 'image/jpeg' });
+    const newFile = new File(['new'], 'new.jpg', { type: 'image/jpeg' });
+    api.uploadVisitPhotos
+      .mockReturnValueOnce(oldPending.promise)
+      .mockReturnValueOnce(newPending.promise)
+      .mockReturnValueOnce(unexpectedPending.promise);
+    api.disconnectCouple.mockResolvedValue({ disconnected: true, coupleId: 'couple-1' });
+
+    let oldOperation;
+    act(() => {
+      oldOperation = appState.addVisitPhotos('record-1', [oldFile]);
+    });
+
+    await act(async () => {
+      await appState.disconnectCouple({ requestKey: 'disconnect-old-couple' });
+      api.getCouple.mockResolvedValue({ ...RESTORED_COUPLE, coupleId: 'couple-2' });
+      api.getRecords.mockResolvedValue([newRecord]);
+      await appState.retryBootstrap();
+    });
+
+    let newOperation;
+    act(() => {
+      newOperation = appState.addVisitPhotos('record-1', [newFile]);
+    });
+
+    await act(async () => {
+      oldPending.resolve([]);
+      await oldOperation;
+    });
+
+    const duplicateNewOperation = appState.addVisitPhotos('record-1', [newFile]);
+    expect(duplicateNewOperation).toBe(newOperation);
+    expect(api.uploadVisitPhotos).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      newPending.resolve([]);
+      await Promise.all([newOperation, duplicateNewOperation]);
+    });
+  });
+
   it('업로드 성공 뒤 signed record 새로고침이 실패해도 성공 상태를 재업로드하지 않는다', async () => {
     const record = { id: 'record-1', coupleId: 'couple-1', photos: [] };
     await renderReadyProvider([record]);
@@ -812,6 +1059,61 @@ describe('AppProvider actions', () => {
     expect(api.uploadVisitPhotos).toHaveBeenCalledTimes(1);
     expect(api.getRecords).toHaveBeenCalledTimes(3);
     expect(appState.records).toEqual(refreshed);
+  });
+
+  it('이전 삭제 정리가 같은 사진 id의 새 epoch 삭제를 풀지 않는다', async () => {
+    const oldPhoto = {
+      id: 'photo-a',
+      bucket: 'visit-photos',
+      path: 'couple-1/record-1/a.webp',
+      ownedByMe: true,
+    };
+    const newPhoto = {
+      ...oldPhoto,
+      path: 'couple-2/record-1/a.webp',
+    };
+    const oldRecord = { id: 'record-1', coupleId: 'couple-1', photos: [oldPhoto] };
+    const newRecord = { id: 'record-1', coupleId: 'couple-2', photos: [newPhoto] };
+    await renderReadyProvider([oldRecord]);
+    const oldPending = deferred();
+    const newPending = deferred();
+    const unexpectedPending = deferred();
+    api.deleteVisitPhoto
+      .mockReturnValueOnce(oldPending.promise)
+      .mockReturnValueOnce(newPending.promise)
+      .mockReturnValueOnce(unexpectedPending.promise);
+    api.disconnectCouple.mockResolvedValue({ disconnected: true, coupleId: 'couple-1' });
+
+    let oldOperation;
+    act(() => {
+      oldOperation = appState.deleteVisitPhoto('record-1', oldPhoto);
+    });
+
+    await act(async () => {
+      await appState.disconnectCouple({ requestKey: 'disconnect-before-delete' });
+      api.getCouple.mockResolvedValue({ ...RESTORED_COUPLE, coupleId: 'couple-2' });
+      api.getRecords.mockResolvedValue([newRecord]);
+      await appState.retryBootstrap();
+    });
+
+    let newOperation;
+    act(() => {
+      newOperation = appState.deleteVisitPhoto('record-1', newPhoto);
+    });
+
+    await act(async () => {
+      oldPending.resolve({ photoId: 'photo-a', status: 'failed', objectDeleted: false });
+      await oldOperation;
+    });
+
+    const duplicateNewOperation = appState.deleteVisitPhoto('record-1', newPhoto);
+    expect(duplicateNewOperation).toBe(newOperation);
+    expect(api.deleteVisitPhoto).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      newPending.resolve({ photoId: 'photo-a', status: 'failed', objectDeleted: false });
+      await Promise.all([newOperation, duplicateNewOperation]);
+    });
   });
 
   it('삭제 실패 단계와 object 삭제 여부를 보존하고 재시도에 그대로 전달한다', async () => {
