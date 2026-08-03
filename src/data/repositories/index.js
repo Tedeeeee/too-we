@@ -1,4 +1,5 @@
 import { AppError, ERROR_CODES } from '../errors';
+import { kakaoPlacesAdapter } from '../kakao-places';
 import { createCouplesRepository } from './couples';
 import { createPlaceSearchRepository } from './places';
 import { createSessionRepository } from './session';
@@ -14,7 +15,7 @@ const defaultRequestKey = () => {
 export function createRepositories({
   client,
   getClient,
-  placeSearchAdapter,
+  placeSearchAdapter = kakaoPlacesAdapter,
   newRequestKey = defaultRequestKey,
   now = () => new Date(),
 } = {}) {

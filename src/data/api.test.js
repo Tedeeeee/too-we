@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import { ERROR_CODES } from './errors';
 import { __resetSupabaseClient, __setSupabaseClient } from './supabase';
@@ -10,6 +10,7 @@ import {
 } from './repositories/__fixtures__/fake-supabase';
 
 const ME = '11111111-1111-4111-8111-111111111111';
+const originalKakao = globalThis.kakao;
 
 const visitRow = (over = {}) => ({
   id: 'v1',
@@ -37,6 +38,8 @@ beforeEach(() => {
 
 afterEach(() => {
   __resetSupabaseClient();
+  if (originalKakao === undefined) delete globalThis.kakao;
+  else globalThis.kakao = originalKakao;
 });
 
 describe('data API facade', () => {
@@ -171,7 +174,57 @@ describe('data API facade', () => {
     ]);
   });
 
-  it('Wave 3 전 장소 API와 저장 모델이 없는 설정 API는 픽스처를 만들지 않는다', async () => {
+  it('기본 Kakao 어댑터로 키워드를 검색하고 같은 장소 스냅샷을 다시 찾는다', async () => {
+    const keywordSearch = vi.fn((_keyword, callback) => callback([
+      {
+        id: 'kakao-api-1',
+        place_name: '연남동 카페',
+        category_name: '음식점 > 카페',
+        address_name: '서울 마포구 연남동',
+        road_address_name: '서울 마포구 동교로 1',
+        phone: '02-000-0000',
+        place_url: 'https://place.map.kakao.com/kakao-api-1',
+        y: '37.566',
+        x: '126.922',
+      },
+    ], 'OK'));
+    const Places = vi.fn(function PlacesService() {
+      this.keywordSearch = keywordSearch;
+    });
+    globalThis.kakao = {
+      maps: {
+        services: {
+          Places,
+          Status: { OK: 'OK', ZERO_RESULT: 'ZERO_RESULT', ERROR: 'ERROR' },
+          SortBy: { ACCURACY: 'ACCURACY', DISTANCE: 'DISTANCE' },
+        },
+      },
+    };
+    const query = { keyword: '  연남 카페  ' };
+    const original = structuredClone(query);
+
+    const places = await api.getNearbyPlaces(query);
+
+    expect(query).toEqual(original);
+    expect(keywordSearch).toHaveBeenCalledWith('연남 카페', expect.any(Function), {});
+    expect(places).toEqual([
+      {
+        id: 'kakao-api-1',
+        name: '연남동 카페',
+        category: '음식점 > 카페',
+        address: '서울 마포구 연남동',
+        roadAddress: '서울 마포구 동교로 1',
+        phone: '02-000-0000',
+        url: 'https://place.map.kakao.com/kakao-api-1',
+        lat: 37.566,
+        lng: 126.922,
+        provider: 'kakao',
+      },
+    ]);
+    await expect(api.getPlace('kakao-api-1')).resolves.toEqual(places[0]);
+  });
+
+  it('빈 장소 API와 저장 모델이 없는 설정 API는 픽스처를 만들지 않는다', async () => {
     const client = createFakeSupabaseClient({ userId: ME, tables: {}, rpc: {} });
     __setSupabaseClient(client);
 
