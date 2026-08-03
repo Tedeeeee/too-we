@@ -41,6 +41,41 @@ const USAGE = 'usage: node scripts/agent-routing-install-hooks.mjs';
  */
 const REQUIRED_HOOKS = Object.freeze(['pre-commit', 'post-commit']);
 
+/**
+ * 훅과 함께 배포하는 런타임 소스 — 검증기와 그 import 폐쇄집합 전체.
+ *
+ * 훅이 작업 트리의 `scripts/`를 실행하면 Codex가 그 파일을 고쳐(검증기를 `process.exit(0)`으로,
+ * 정책의 `classifyAgent`를 항상 claude로, grant 모듈이 grant를 위조하도록) 같은 커밋에서 가드를
+ * 무력화할 수 있다. 그래서 세 파일을 훅 옆에 복사한다. 셋 다 서로를 `./`로 import하므로 배포
+ * 디렉터리 안에서 해석이 닫히고, 작업 트리 쪽은 런타임에 전혀 읽히지 않는다.
+ */
+const RUNTIME_SOURCE_DIRNAME = 'scripts';
+const RUNTIME_SOURCES = Object.freeze([
+  'verify-agent-routing.mjs',
+  'agent-routing-grant.mjs',
+  'agent-routing-policy.mjs',
+]);
+
+/** 배포 디렉터리에 있어야 하는 파일 전체. 이 목록 밖의 파일은 지운다. */
+const DEPLOYED_FILES = Object.freeze([...REQUIRED_HOOKS, ...RUNTIME_SOURCES]);
+
+/**
+ * 배포 대상 목록. 이름은 두 집합에서 겹치지 않으므로 배포 디렉터리에서 평평하게 놓인다.
+ *
+ * @returns {{ name: string, relative: string, absolute: string }[]}
+ */
+function baselineEntries(primary) {
+  const entry = (dirname, name) => ({
+    name,
+    relative: `${dirname}/${name}`,
+    absolute: path.join(primary, dirname, name),
+  });
+  return [
+    ...REQUIRED_HOOKS.map((name) => entry(TEMPLATE_DIRNAME, name)),
+    ...RUNTIME_SOURCES.map((name) => entry(RUNTIME_SOURCE_DIRNAME, name)),
+  ];
+}
+
 function gitOut(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
@@ -86,20 +121,24 @@ function gitLines(cwd, args) {
  *
  * @returns {string[]} 문제 설명 목록. 비어 있으면 배포해도 된다.
  */
-function validateTemplates({ primary, templateDir }) {
+function validateBaseline({ primary, entries }) {
   const problems = [];
-  for (const hook of REQUIRED_HOOKS) {
-    const relative = `${TEMPLATE_DIRNAME}/${hook}`;
+  for (const { relative, absolute } of entries) {
     let stat;
     try {
-      stat = fs.lstatSync(path.join(templateDir, hook));
+      stat = fs.lstatSync(absolute);
     } catch {
-      problems.push(`${relative} 템플릿이 없다`);
+      problems.push(`${relative} 이 없다`);
       continue;
     }
     // lstat이므로 심볼릭 링크는 일반 파일로 인정되지 않는다.
     if (!stat.isFile()) {
-      problems.push(`${relative} 템플릿이 일반 파일이 아니다`);
+      problems.push(`${relative} 이 일반 파일이 아니다`);
+      continue;
+    }
+    // 상위 디렉터리가 심볼릭 링크로 바뀌어 저장소 밖을 가리키는 경우를 막는다.
+    if (path.relative(primary, fs.realpathSync(absolute)) !== relative.split('/').join(path.sep)) {
+      problems.push(`${relative} 이 주 worktree 안의 같은 경로가 아니다`);
       continue;
     }
 
@@ -111,19 +150,19 @@ function validateTemplates({ primary, templateDir }) {
       staged = gitLines(primary, ['diff', '--cached', '--name-only', 'HEAD', '--', relative]).length > 0;
       unstaged = gitLines(primary, ['diff', '--name-only', '--', relative]).length > 0;
     } catch {
-      problems.push(`${relative} 템플릿의 Git 상태를 확인할 수 없다`);
+      problems.push(`${relative} 의 Git 상태를 확인할 수 없다`);
       continue;
     }
     if (!tracked) {
-      problems.push(`${relative} 템플릿이 Git에 추적되지 않는다 — 커밋된 baseline만 배포한다`);
+      problems.push(`${relative} 이 Git에 추적되지 않는다 — 커밋된 baseline만 배포한다`);
       continue;
     }
     if (staged) {
-      problems.push(`${relative} 템플릿에 커밋되지 않은 staged 변경이 있다`);
+      problems.push(`${relative} 에 커밋되지 않은 staged 변경이 있다`);
       continue;
     }
     if (unstaged) {
-      problems.push(`${relative} 템플릿에 커밋되지 않은 unstaged 변경이 있다`);
+      problems.push(`${relative} 에 커밋되지 않은 unstaged 변경이 있다`);
     }
   }
   return problems;
@@ -187,27 +226,27 @@ export function runInstall(options = {}) {
   }
 
   // 검사를 모두 통과하기 전에는 아무것도 배포하지 않는다.
-  const problems = validateTemplates({ primary, templateDir: resolvedTemplate });
+  const entries = baselineEntries(primary);
+  const problems = validateBaseline({ primary, entries });
   if (problems.length > 0) {
-    error('[agent-routing] 훅 템플릿이 커밋된 깨끗한 baseline이 아니라 설치하지 않는다.');
+    error('[agent-routing] 훅과 런타임 소스가 커밋된 깨끗한 baseline이 아니라 설치하지 않는다.');
     for (const problem of problems) error(`  - ${problem}`);
-    error('[agent-routing] 템플릿을 되돌리거나 커밋한 뒤 다시 설치한다.');
+    error('[agent-routing] 파일을 되돌리거나 커밋한 뒤 다시 설치한다.');
     return 1;
   }
 
   let changed = false;
   try {
     fs.mkdirSync(deployDir, { recursive: true, mode: 0o700 });
-    for (const name of REQUIRED_HOOKS) {
-      const source = path.join(resolvedTemplate, name);
+    for (const { name, absolute } of entries) {
       const target = path.join(deployDir, name);
-      if (sameFile(source, target)) continue;
-      copyAtomic(source, target);
+      if (sameFile(absolute, target)) continue;
+      copyAtomic(absolute, target);
       changed = true;
     }
-    // 배포 대상이 아닌 파일은 없앤다 — 유령 훅이 남아 도는 것을 막는다.
+    // 배포 대상이 아닌 파일은 없앤다 — 유령 훅이나 낡은 런타임이 남아 도는 것을 막는다.
     for (const entry of fs.readdirSync(deployDir, { withFileTypes: true })) {
-      if (!entry.isFile() || REQUIRED_HOOKS.includes(entry.name)) continue;
+      if (!entry.isFile() || DEPLOYED_FILES.includes(entry.name)) continue;
       fs.rmSync(path.join(deployDir, entry.name), { force: true });
       changed = true;
     }
@@ -231,8 +270,8 @@ export function runInstall(options = {}) {
     log(`[agent-routing] 훅이 이미 설치돼 있다: ${target}`);
     return 0;
   }
-  log(`[agent-routing] 훅 배포: ${REQUIRED_HOOKS.join(', ')} → ${target}`);
-  log('[agent-routing] 모든 worktree가 같은 훅을 쓴다 (작업 트리 밖이라 커밋으로 지울 수 없다).');
+  log(`[agent-routing] 배포: ${DEPLOYED_FILES.join(', ')} → ${target}`);
+  log('[agent-routing] 모든 worktree가 이 사본을 쓴다 (작업 트리 밖이라 커밋으로 바꿀 수 없다).');
   return 0;
 }
 

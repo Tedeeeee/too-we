@@ -76,10 +76,17 @@ main
 살아 있는 fallback grant를 요구한다. Claude와 사람 세션, 그리고 `docs/**/*.md`와 루트
 `AGENTS.md` / `CLAUDE.md` / `README.md`만 바꾸는 Codex 세션은 그대로 통과한다.
 
-설치는 통합 worktree에서 한 번만 하면 된다. 버전 관리되는 `.githooks/` 템플릿을
-`<git-common-dir>/orca-routing-hooks/`로 복사하고 공유 `core.hooksPath`를 그 절대 경로로
-맞추므로, 기존·새 worktree가 모두 같은 훅을 쓴다. 배포본은 작업 트리 밖이라 커밋으로
-지울 수 없다.
+설치는 통합 worktree에서 한 번만 하면 된다. 버전 관리되는 `.githooks/` 템플릿 두 개와
+검증기 런타임 세 개(`verify-agent-routing.mjs`, `agent-routing-grant.mjs`,
+`agent-routing-policy.mjs`)를 `<git-common-dir>/orca-routing-hooks/`로 복사하고 공유
+`core.hooksPath`를 그 절대 경로로 맞추므로, 기존·새 worktree가 모두 같은 사본을 쓴다.
+배포본은 작업 트리 밖이라 커밋으로 바꿀 수 없다.
+
+**훅은 작업 트리의 `scripts/`를 실행하지 않는다.** 실행하면 Codex가 같은 커밋에서 검증기를
+`process.exit(0)`으로 바꿔 가드를 통과할 수 있다. 대신 배포된 사본만 실행하며, 배포는 다섯
+파일이 모두 Git이 추적하는 일반 파일이고 HEAD 기준 staged·unstaged 변경이 없을 때만 이뤄진다.
+따라서 **가드 코드를 고쳤으면 커밋한 뒤 다시 설치해야 반영된다**(`npm install`의 postinstall도
+같은 일을 한다). `pretest`·`prebuild`는 편의 검사이므로 작업 트리 사본을 그대로 쓴다.
 
 ```bash
 npm run agent-routing:install   # 훅 배포 (postinstall에서도 자동 실행, 반복 실행 안전)

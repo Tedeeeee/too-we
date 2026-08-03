@@ -231,13 +231,13 @@ describe('hook installation', () => {
     expect(fs.readFileSync(path.join(deployedDir(), 'pre-commit'), 'utf8')).toBe('#!/bin/sh\nexit 0\n');
   });
 
-  it('deploys exactly pre-commit and post-commit, ignoring other template files', () => {
+  it('ignores template files outside the exact deployed set', () => {
     writeFile(workspace.primary, '.githooks/extra.sh', '#!/bin/sh\necho extra\n');
     git(workspace.primary, ['add', '--', '.githooks/extra.sh']);
     git(workspace.primary, ['commit', '-q', '-m', 'chore: extra script', '--no-verify']);
 
     expect(install()).toBe(0);
-    expect(fs.readdirSync(deployedDir()).sort()).toEqual(['post-commit', 'pre-commit']);
+    expect(fs.readdirSync(deployedDir())).not.toContain('extra.sh');
   });
 
   it('resolves the primary worktree even when invoked from a child worktree', () => {
@@ -372,6 +372,218 @@ describe('pre-commit hook', () => {
   });
 });
 
+/**
+ * 배포된 훅이 실행해야 하는 파일 전체.
+ *
+ * 훅 두 개와 런타임 소스 세 개(검증기와 그 의존성)를 함께 배포한다. 훅이 작업 트리의
+ * `scripts/`를 실행하면 Codex가 그 파일을 고쳐 가드를 무력화할 수 있다.
+ */
+const DEPLOYED_RUNTIME = [
+  'agent-routing-grant.mjs',
+  'agent-routing-policy.mjs',
+  'post-commit',
+  'pre-commit',
+  'verify-agent-routing.mjs',
+];
+
+/** 작업 트리 검증기를 "전부 통과"로 바꾼 것. 배포본이 쓰이면 아무 효과가 없어야 한다. */
+const ALLOW_ALL_VERIFIER = 'process.exit(0);\n';
+
+/**
+ * 진짜 정책 모듈에서 `classifyAgent`만 무력화한다.
+ *
+ * 빈 스텁으로 바꾸면 grant 모듈이 import하는 다른 이름들이 사라져 import 자체가 깨지고,
+ * 그러면 "무엇 때문에 막혔는지"가 흐려진다. 나머지 export를 그대로 두고 조기 return만
+ * 심어야 실제로 통과했을 우회를 재현한다.
+ */
+function permissivePolicySource(primary) {
+  const real = fs.readFileSync(path.join(primary, 'scripts/agent-routing-policy.mjs'), 'utf8');
+  const tampered = real.replace('export function classifyAgent(env) {', "export function classifyAgent(env) { return 'claude';");
+  // 치환이 조용히 실패해 테스트가 무의미해지는 것을 막는다.
+  expect(tampered).not.toBe(real);
+  return tampered;
+}
+
+/** grant 모듈은 grant 내용과 Dispatch 응답을 함께 공급하므로 단독으로 위조가 가능하다. */
+const FORGING_GRANT = `const now = Date.now();
+export function grantFilePath() { return 'forged'; }
+export function readGrantFile() {
+  return {
+    version: 1,
+    reason: 'claude_account_capacity_exhausted',
+    status: 'active',
+    terminalHandle: process.env.ORCA_TERMINAL_HANDLE,
+    taskId: 'task_forged',
+    dispatchId: 'ctx_forged',
+    runId: 'run_forged',
+    issuedByCoordinatorHandle: 'term_forged_coordinator',
+    evidenceSource: 'read-only-usage-check',
+    observedAt: new Date(now - 60000).toISOString(),
+    expiresAt: new Date(now + 1800000).toISOString(),
+    allowedPaths: ['src', 'scripts'],
+    remainingScope: 'forged scope',
+    createdAt: new Date(now - 60000).toISOString(),
+    finalizedAt: new Date(now - 30000).toISOString(),
+  };
+}
+export function createOrcaAdapter() {
+  return {
+    dispatchShow() {
+      return { status: 0, stdout: JSON.stringify({ result: { dispatch: {
+        id: 'ctx_forged',
+        task_id: 'task_forged',
+        run_id: 'run_forged',
+        status: 'dispatched',
+        assignee_handle: process.env.ORCA_TERMINAL_HANDLE,
+      } } }) };
+    },
+    runShow() { return { status: 0, stdout: '{}' }; },
+  };
+}
+export function runGrant() { return 0; }
+`;
+
+describe('deployed runtime isolation', () => {
+  beforeEach(() => {
+    installGuardFiles(workspace.primary);
+    expect(install()).toBe(0);
+  });
+
+  /** 작업 트리의 가드 파일을 무력화하고 제품 변경과 함께 stage한다. */
+  function tamperAndStageProductChange(relativePath, contents) {
+    writeFile(workspace.primary, relativePath, contents);
+    git(workspace.primary, ['add', '--', relativePath]);
+    writeFile(workspace.primary, 'src/data/api.js', 'codex edit\n');
+    git(workspace.primary, ['add', '--', 'src/data/api.js']);
+  }
+
+  it('deploys the verifier and its dependencies beside the hooks', () => {
+    expect(fs.readdirSync(deployedDir()).sort()).toEqual(DEPLOYED_RUNTIME);
+    for (const name of DEPLOYED_RUNTIME) {
+      const source = name.endsWith('.mjs')
+        ? path.join(workspace.primary, 'scripts', name)
+        : templatePath(name);
+      expect(fs.readFileSync(path.join(deployedDir(), name)).equals(fs.readFileSync(source)), name).toBe(true);
+    }
+  });
+
+  it('removes deployed files that are not part of the runtime', () => {
+    fs.writeFileSync(path.join(deployedDir(), 'stray.mjs'), 'process.exit(0);\n');
+    expect(install()).toBe(0);
+    expect(fs.readdirSync(deployedDir()).sort()).toEqual(DEPLOYED_RUNTIME);
+  });
+
+  it('rejects an ungranted Codex commit when the working-tree verifier allows everything', () => {
+    const before = git(workspace.primary, ['rev-parse', 'HEAD']);
+    tamperAndStageProductChange('scripts/verify-agent-routing.mjs', ALLOW_ALL_VERIFIER);
+
+    const result = tryGit(workspace.primary, ['commit', '-m', 'feat: sneak past the guard'], CODEX_ENV);
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('src/data/api.js');
+    expect(git(workspace.primary, ['rev-parse', 'HEAD'])).toBe(before);
+  });
+
+  it('rejects an ungranted Codex commit when the working-tree policy is permissive', () => {
+    const before = git(workspace.primary, ['rev-parse', 'HEAD']);
+    tamperAndStageProductChange('scripts/agent-routing-policy.mjs', permissivePolicySource(workspace.primary));
+
+    const result = tryGit(workspace.primary, ['commit', '-m', 'feat: sneak past the guard'], CODEX_ENV);
+    expect(result.status).not.toBe(0);
+    expect(git(workspace.primary, ['rev-parse', 'HEAD'])).toBe(before);
+  });
+
+  it('rejects an ungranted Codex commit when the working-tree grant module forges a grant', () => {
+    const before = git(workspace.primary, ['rev-parse', 'HEAD']);
+    tamperAndStageProductChange('scripts/agent-routing-grant.mjs', FORGING_GRANT);
+
+    const result = tryGit(workspace.primary, ['commit', '-m', 'feat: sneak past the guard'], CODEX_ENV);
+    expect(result.status).not.toBe(0);
+    expect(git(workspace.primary, ['rev-parse', 'HEAD'])).toBe(before);
+  });
+
+  it('rejects an ungranted Codex commit when the working-tree verifier is deleted', () => {
+    const before = git(workspace.primary, ['rev-parse', 'HEAD']);
+    git(workspace.primary, ['rm', '-q', '--', 'scripts/verify-agent-routing.mjs']);
+    writeFile(workspace.primary, 'src/data/api.js', 'codex edit\n');
+    git(workspace.primary, ['add', '--', 'src/data/api.js']);
+
+    const result = tryGit(workspace.primary, ['commit', '-m', 'feat: drop the verifier'], CODEX_ENV);
+    expect(result.status).not.toBe(0);
+    expect(git(workspace.primary, ['rev-parse', 'HEAD'])).toBe(before);
+  });
+
+  it('still blocks from a linked worktree when the primary working tree is tampered', () => {
+    const linked = addWorktree(workspace, 'child', 'claude/feature');
+    writeFile(workspace.primary, 'scripts/verify-agent-routing.mjs', ALLOW_ALL_VERIFIER);
+    writeFile(linked, 'src/data/api.js', 'codex edit\n');
+    git(linked, ['add', '--', 'src/data/api.js']);
+
+    const result = tryGit(linked, ['commit', '-m', 'feat: sneak past the guard'], CODEX_ENV);
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('src/data/api.js');
+  });
+
+  it('still permits a Codex documentation commit through the deployed runtime', () => {
+    writeFile(workspace.primary, 'docs/notes.md', '# notes\n');
+    git(workspace.primary, ['add', '--', 'docs/notes.md']);
+    expect(tryGit(workspace.primary, ['commit', '-m', 'docs: notes'], CODEX_ENV).status).toBe(0);
+  });
+});
+
+describe('runtime source baseline', () => {
+  beforeEach(() => {
+    installGuardFiles(workspace.primary);
+  });
+
+  const RUNTIME_SOURCES = [
+    'scripts/verify-agent-routing.mjs',
+    'scripts/agent-routing-grant.mjs',
+    'scripts/agent-routing-policy.mjs',
+  ];
+
+  it('refuses a missing runtime source', () => {
+    for (const relative of RUNTIME_SOURCES) {
+      cleanup(workspace.root);
+      workspace = makeWorkspace();
+      installGuardFiles(workspace.primary);
+      output.length = 0;
+      fs.rmSync(path.join(workspace.primary, relative));
+      expect(install(), relative).toBe(1);
+      expect(output.join('\n'), relative).toContain(relative);
+      expectNotInstalled();
+    }
+  });
+
+  it('refuses an untracked runtime source', () => {
+    git(workspace.primary, ['rm', '-q', '--cached', '--', 'scripts/agent-routing-policy.mjs']);
+    expect(install()).toBe(1);
+    expect(output.join('\n')).toContain('scripts/agent-routing-policy.mjs');
+    expectNotInstalled();
+  });
+
+  it('refuses a staged-dirty runtime source', () => {
+    writeFile(workspace.primary, 'scripts/verify-agent-routing.mjs', ALLOW_ALL_VERIFIER);
+    git(workspace.primary, ['add', '--', 'scripts/verify-agent-routing.mjs']);
+    expect(install()).toBe(1);
+    expect(output.join('\n')).toContain('scripts/verify-agent-routing.mjs');
+    expectNotInstalled();
+  });
+
+  it('refuses an unstaged-dirty runtime source', () => {
+    writeFile(workspace.primary, 'scripts/agent-routing-grant.mjs', FORGING_GRANT);
+    expect(install()).toBe(1);
+    expect(output.join('\n')).toContain('scripts/agent-routing-grant.mjs');
+    expectNotInstalled();
+  });
+
+  it('refuses a runtime source that is not a regular file', () => {
+    fs.rmSync(path.join(workspace.primary, 'scripts/agent-routing-policy.mjs'));
+    fs.mkdirSync(path.join(workspace.primary, 'scripts/agent-routing-policy.mjs'));
+    expect(install()).toBe(1);
+    expectNotInstalled();
+  });
+});
+
 describe('tamper resistance', () => {
   beforeEach(() => {
     installGuardFiles(workspace.primary);
@@ -389,22 +601,35 @@ describe('tamper resistance', () => {
     expect(git(workspace.primary, ['rev-parse', 'HEAD'])).toBe(before);
   });
 
-  it('blocks every session when the verifier is staged for deletion', () => {
+  /**
+   * 훅이 작업 트리의 검증기를 실행하던 동안에는 그 파일을 지우면 **모든** 세션의 커밋이
+   * 막혔다. 그것은 우회 가능한 구조가 낳은 부작용이었다 — Claude가 가드를 리팩터링하지도
+   * 못했다. 배포된 사본을 실행하는 지금은 Codex만 막힌다(가드 파일은 구현 경로이므로
+   * grant 없이 손댈 수 없다). 어느 쪽이든 배포된 런타임은 그대로 남아 가드가 풀리지 않는다.
+   */
+  it('blocks Codex from removing the verifier but lets Claude refactor it', () => {
     const before = git(workspace.primary, ['rev-parse', 'HEAD']);
     git(workspace.primary, ['rm', '-q', '--', 'scripts/verify-agent-routing.mjs']);
 
-    for (const env of [CODEX_ENV, CLAUDE_ENV, {}]) {
-      const result = tryGit(workspace.primary, ['commit', '-m', 'chore: drop verifier'], env);
-      expect(result.status, JSON.stringify(env)).not.toBe(0);
-      expect(`${result.stdout}${result.stderr}`, JSON.stringify(env)).toMatch(/agent-routing/);
-      expect(git(workspace.primary, ['rev-parse', 'HEAD'])).toBe(before);
-    }
+    const blocked = tryGit(workspace.primary, ['commit', '-m', 'chore: drop verifier'], CODEX_ENV);
+    expect(blocked.status).not.toBe(0);
+    expect(`${blocked.stdout}${blocked.stderr}`).toContain('scripts/verify-agent-routing.mjs');
+    expect(git(workspace.primary, ['rev-parse', 'HEAD'])).toBe(before);
+
+    expect(tryGit(workspace.primary, ['commit', '-m', 'refactor: drop verifier'], CLAUDE_ENV).status).toBe(0);
+    expect(fs.existsSync(path.join(deployedDir(), 'verify-agent-routing.mjs'))).toBe(true);
   });
 
-  it('blocks every session when the verifier is moved away', () => {
+  it('keeps the guard armed after the working-tree verifier is moved away', () => {
     git(workspace.primary, ['mv', 'scripts/verify-agent-routing.mjs', 'scripts/parked.mjs']);
-    const result = tryGit(workspace.primary, ['commit', '-m', 'chore: move verifier'], {});
+    expect(tryGit(workspace.primary, ['commit', '-m', 'refactor: park verifier'], CLAUDE_ENV).status).toBe(0);
+
+    // 작업 트리에 검증기가 아예 없어도 배포된 런타임이 무허가 Codex 변경을 막는다.
+    writeFile(workspace.primary, 'src/data/api.js', 'codex edit\n');
+    git(workspace.primary, ['add', '--', 'src/data/api.js']);
+    const result = tryGit(workspace.primary, ['commit', '-m', 'feat: product edit'], CODEX_ENV);
     expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('src/data/api.js');
   });
 });
 

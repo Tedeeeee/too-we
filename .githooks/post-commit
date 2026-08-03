@@ -5,6 +5,8 @@
 # pre-commit이 grant를 staged tree에 예약해 두므로, 그 tree가 실제 커밋된 경우에만
 # 소진된다. 예약과 다른 tree가 커밋됐거나 이 터미널에 grant가 없으면 아무 일도 없다.
 #
+# pre-commit과 같은 이유로 작업 트리의 `scripts/`가 아니라 배포된 사본을 실행한다.
+#
 # 세션 주체를 셸에서 판정하지 않는다. Orca가 `CODEX_HOME`을 모든 터미널에 물려주기
 # 때문에 셸 수준의 표식 검사는 Claude 세션을 Codex로 오판한다. 대신 `consume`이
 # terminal·예약 tree·활성 상태를 모두 대조하므로, grant가 없는 세션에서는 조용히 실패한다.
@@ -16,12 +18,12 @@ if [ -z "$ORCA_TERMINAL_HANDLE" ]; then
   exit 0
 fi
 
-primary=$(git worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')
-if [ -z "$primary" ]; then
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+if [ -z "$common" ]; then
   exit 0
 fi
 
-grant_cli="$primary/scripts/agent-routing-grant.mjs"
+grant_cli="$common/orca-routing-hooks/agent-routing-grant.mjs"
 if [ ! -f "$grant_cli" ]; then
   exit 0
 fi
