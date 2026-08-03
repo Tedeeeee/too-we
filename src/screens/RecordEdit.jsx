@@ -40,6 +40,24 @@ const combineLocalDateAndTime = (dateValue, timeValue) => {
   return combined.toISOString();
 };
 
+const clonePlace = (place) => (
+  place && typeof place === 'object' ? { ...place } : place
+);
+
+const freezeDraftSnapshot = (draft) => {
+  const place = clonePlace(draft.place);
+  const tags = Object.freeze(Array.isArray(draft.tags) ? draft.tags.slice() : []);
+  return Object.freeze({
+    place: place && typeof place === 'object' ? Object.freeze(place) : place,
+    date: draft.date,
+    time: draft.time,
+    flower: draft.flower || null,
+    tags,
+    text: draft.text,
+    rating: draft.rating,
+  });
+};
+
 /** 장소 상세 편집(기록 수정) — 공동 필드와 내 개인 필드만 한 번에 저장한다. */
 export default function RecordEdit() {
   const navigate = useNavigate();
@@ -68,22 +86,29 @@ export default function RecordEdit() {
   const myEntry = record.entries?.find((entry) => entry.memberId === 'me');
   const partnerEntry = record.entries?.find((entry) => entry.memberId === 'partner');
   const initialDate = localDateAndTime(record.date);
+  const returnedDraft = location.state?.draft;
   const returnedPlace = location.state?.place;
   const state = draft || {
-    place: returnedPlace || record.place || {
+    place: clonePlace(returnedDraft?.place || returnedPlace || record.place || {
       id: record.placeId,
       providerId: record.placeId,
       provider: 'kakao',
       name: record.placeName,
-    },
-    date: initialDate.date,
-    time: initialDate.time,
-    rating: Number.isInteger(myEntry?.rating)
+    }),
+    date: typeof returnedDraft?.date === 'string' ? returnedDraft.date : initialDate.date,
+    time: typeof returnedDraft?.time === 'string' ? returnedDraft.time : initialDate.time,
+    rating: Number.isInteger(returnedDraft?.rating)
+      ? returnedDraft.rating
+      : Number.isInteger(myEntry?.rating)
       ? myEntry.rating
       : Number.isInteger(record.rating) ? record.rating : 0,
-    flower: record.flower ?? '',
-    tags: Array.isArray(record.tags) ? record.tags.slice() : [],
-    text: myEntry?.text ?? '',
+    flower: returnedDraft && Object.hasOwn(returnedDraft, 'flower')
+      ? returnedDraft.flower ?? ''
+      : record.flower ?? '',
+    tags: Array.isArray(returnedDraft?.tags)
+      ? returnedDraft.tags.slice()
+      : Array.isArray(record.tags) ? record.tags.slice() : [],
+    text: typeof returnedDraft?.text === 'string' ? returnedDraft.text : myEntry?.text ?? '',
   };
 
   const patch = (next) => {
@@ -120,7 +145,7 @@ export default function RecordEdit() {
     setError(null);
     try {
       await updateRecord(recordId, payload);
-      navigate(`/place/${recordId}`, { replace: true });
+      navigate(-1);
     } catch (nextError) {
       const appError = toAppError(nextError);
       setError({ message: userMessage(appError.code), retryable: appError.retryable });
@@ -169,7 +194,14 @@ export default function RecordEdit() {
             type="button"
             aria-label="장소"
             disabled={saving}
-            onClick={() => navigate('/map', { state: { intent: 'edit-record-place', recordId } })}
+            onClick={() => navigate('/map', {
+              replace: true,
+              state: Object.freeze({
+                intent: 'edit-record-place',
+                recordId,
+                draft: freezeDraftSnapshot(state),
+              }),
+            })}
             style={{ position: 'absolute', left: 16, top: 430, width: 370, height: 48, background: palette.white, borderRadius: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px', boxSizing: 'border-box', cursor: 'pointer' }}
           >
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: fonts.hand, fontSize: 20, color: palette.text }}>{state.place?.name || record.placeName}</span>

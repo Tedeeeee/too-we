@@ -52,6 +52,16 @@ const SECOND_PLACE = {
   lng: 127.049,
 };
 
+const EDIT_DRAFT = {
+  place: { ...SECOND_PLACE },
+  date: '2026-08-08',
+  time: '20:40',
+  flower: 'lilac',
+  tags: ['# 첫째', '# 셋째'],
+  text: '지도 왕복 draft',
+  rating: 5,
+};
+
 const originalGeolocation = Object.getOwnPropertyDescriptor(
   globalThis.navigator,
   'geolocation',
@@ -81,9 +91,16 @@ function Destination() {
   return <div>새 기록 화면</div>;
 }
 
-function renderMap({ intent, recordId, strict = false } = {}) {
+function renderMap({ intent, recordId, draft, strict = false } = {}) {
   const entry = intent
-    ? { pathname: '/map', state: { intent, ...(recordId ? { recordId } : {}) } }
+    ? {
+        pathname: '/map',
+        state: {
+          intent,
+          ...(recordId ? { recordId } : {}),
+          ...(draft ? { draft } : {}),
+        },
+      }
     : { pathname: '/map' };
   const content = (
     <MemoryRouter initialEntries={[entry]}>
@@ -296,17 +313,27 @@ describe('MapSelect selection and route intent', () => {
 
   it('edit-record-place intent에서 선택한 전체 스냅샷만 원래 수정 화면으로 돌려준다', async () => {
     const user = userEvent.setup();
+    const draft = { ...EDIT_DRAFT, partnerText: '전달하면 안 되는 짝궁 값' };
     api.getNearbyPlaces.mockResolvedValue([{ ...PLACE }]);
-    renderMap({ intent: 'edit-record-place', recordId: 'visit-1' });
+    renderMap({ intent: 'edit-record-place', recordId: 'visit-1', draft });
     await submitKeyword(user, '성수 카페');
 
     await user.click(await screen.findByRole('button', { name: resultName(PLACE) }));
 
     expect(await screen.findByText('새 기록 화면')).toBeInTheDocument();
     expect(destinationLocation.pathname).toBe('/place/visit-1/edit');
-    expect(destinationLocation.state).toEqual({ place: PLACE });
-    expect(destinationLocation.state.place).not.toBe(PLACE);
-    expect(Object.isFrozen(destinationLocation.state.place)).toBe(true);
+    expect(destinationLocation.state).toEqual({
+      draft: {
+        ...EDIT_DRAFT,
+        place: PLACE,
+      },
+    });
+    expect(destinationLocation.state.draft.place).not.toBe(PLACE);
+    expect(destinationLocation.state.draft.tags).not.toBe(EDIT_DRAFT.tags);
+    expect(Object.isFrozen(destinationLocation.state.draft)).toBe(true);
+    expect(Object.isFrozen(destinationLocation.state.draft.place)).toBe(true);
+    expect(Object.isFrozen(destinationLocation.state.draft.tags)).toBe(true);
+    expect(JSON.stringify(destinationLocation.state)).not.toContain('전달하면 안 되는 짝궁 값');
   });
 });
 
