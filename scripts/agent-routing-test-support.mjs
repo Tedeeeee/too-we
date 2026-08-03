@@ -25,8 +25,58 @@ const GUARD_FILES = [
   '.gitattributes',
 ];
 
+/**
+ * 세션 주체를 결정하는 Codex 세션 고유 표식.
+ *
+ * `CODEX_HOME`/`ORCA_CODEX_HOME`은 Orca가 모든 터미널에 물려주는 ambient 값이라 여기 없다.
+ * 정책은 그 둘보다 이 표식을 우선하며(있으면 fail closed), 그것이 올바른 동작이다.
+ */
+export const SESSION_UNIQUE_CODEX_MARKERS = Object.freeze(['CODEX_THREAD_ID', 'CODEX_SESSION_ID']);
+
+/**
+ * 자식 프로세스에 넘길 밀폐된 환경을 만든다.
+ *
+ * 이 테스트들은 실제 `git commit`을 띄우므로 부모 환경을 물려받는다. 부모가 진짜 Codex
+ * 세션이면 세션 고유 표식이 새어 들어와 "Claude 세션" fixture가 Codex로 판정되고, Claude
+ * 허용 케이스가 부모 세션에 따라 결과를 바꾼다. 그래서 세션 고유 표식만 걷어낸다 —
+ * ambient Codex 표식과 그 밖의 상속 환경(PATH 등)은 실제 작업자 조건이라 그대로 둔다.
+ *
+ * 명시적으로 요청한 값은 항상 이긴다. `CODEX_ENV`처럼 세션 고유 표식을 직접 넣으면 그대로
+ * 남아 Codex로 판정된다. `null`을 주면 그 키를 지운다.
+ *
+ * @param {Record<string, string|null|undefined>} [overrides]
+ * @param {Record<string, string|undefined>} [base] 부모 환경 (테스트 주입용)
+ */
+export function childEnv(overrides = {}, base = process.env) {
+  const env = { ...base };
+  for (const name of SESSION_UNIQUE_CODEX_MARKERS) delete env[name];
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === null || value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  return env;
+}
+
+/**
+ * 이벤트 루프를 한 번 돌려준다(microtask가 아니라 macrotask).
+ *
+ * 라우팅 훅 테스트는 테스트마다 git·node 하위 프로세스를 십수 번 **동기로** 띄운다.
+ * `await syncHelper()`는 microtask만 소비하므로 메시지 포트가 비워지지 않고, vitest worker가
+ * `onTaskUpdate` RPC 응답을 처리할 틈을 얻지 못해 5초 타임아웃이 unhandled error로 올라온다.
+ * 그러면 테스트가 전부 통과해도 종료 코드가 1이 되어 검증이 실패한다. 무거운 동기 구간
+ * 사이에 이것을 한 번 넣어 끊어 준다.
+ */
+export function yieldToEventLoop() {
+  return new Promise((resolve) => { setImmediate(resolve); });
+}
+
 export function git(cwd, args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: childEnv(),
+  }).trim();
 }
 
 /** 실패해도 던지지 않는 git 실행 — 훅이 커밋을 막는지 확인할 때 쓴다. */
@@ -34,7 +84,7 @@ export function tryGit(cwd, args, env = {}) {
   const result = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, ...env },
+    env: childEnv(env),
     windowsHide: true,
   });
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
@@ -84,6 +134,7 @@ export function makeClone({ root, primary }, name) {
   execFileSync('git', ['clone', '-q', '--no-hardlinks', '-c', 'core.autocrlf=true', primary, dir], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: childEnv(),
   });
   git(dir, ['config', 'user.email', 'guard@example.test']);
   git(dir, ['config', 'user.name', 'Guard Test']);

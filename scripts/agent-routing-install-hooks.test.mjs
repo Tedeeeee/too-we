@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { grantFilePath, readGrantFile, runGrant } from './agent-routing-grant.mjs';
 import {
   addWorktree,
+  childEnv,
   cleanup,
   git,
   installGuardFiles,
@@ -20,8 +21,10 @@ import {
   orcaStub,
   tryGit,
   writeFile,
+  yieldToEventLoop,
 } from './agent-routing-test-support.mjs';
 import { deployedHooksDir, runInstall } from './agent-routing-install-hooks.mjs';
+import { classifyAgent } from './agent-routing-policy.mjs';
 
 const TERMINAL = 'term_dd2dc226-4f0c-4af3-ac3c-ce5d97d135ec';
 const TASK = 'task_288b4e349139';
@@ -37,14 +40,31 @@ const CODEX_ENV = { CODEX_THREAD_ID: 'thread-1', ORCA_TERMINAL_HANDLE: TERMINAL 
 let workspace;
 let output;
 
-beforeEach(() => {
+beforeEach(async () => {
   workspace = makeWorkspace();
   output = [];
+  await yieldToEventLoop();
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup(workspace.root);
+  await yieldToEventLoop();
 });
+
+/**
+ * 공유 셋업 — 9개 describe가 같은 두세 줄을 반복하던 것을 모았고, 무거운 동기 구간
+ * 사이에 macrotask를 하나 넣어 vitest RPC가 굶지 않게 한다.
+ */
+async function useGuardFiles() {
+  installGuardFiles(workspace.primary);
+  await yieldToEventLoop();
+}
+
+async function useInstalledGuard() {
+  await useGuardFiles();
+  expect(install()).toBe(0);
+  await yieldToEventLoop();
+}
 
 function install(options = {}) {
   return runInstall({
@@ -89,10 +109,66 @@ function expectNotInstalled() {
     .not.toContain('orca-routing-hooks');
 }
 
-describe('installer argv surface', () => {
-  beforeEach(() => {
-    installGuardFiles(workspace.primary);
+/**
+ * 자식 프로세스 환경은 부모 세션과 무관하게 같은 판정을 내려야 한다.
+ *
+ * 이 테스트 파일은 실제 `git commit`을 띄우므로 부모 환경을 물려받는다. 부모가 진짜 Codex
+ * 세션이면 세션 고유 표식(`CODEX_THREAD_ID`/`CODEX_SESSION_ID`)이 새어 들어와 "Claude 세션"
+ * fixture가 Codex로 판정된다. 정책은 그렇게 동작하는 것이 맞다 — 세션 고유 표식이 있으면
+ * fail closed 해야 한다. 따라서 정책이 아니라 **fixture**를 밀폐해야 한다.
+ *
+ * ambient `CODEX_HOME`/`ORCA_CODEX_HOME`은 그대로 남긴다. Orca가 모든 터미널에 물려주는
+ * 값이라 실제 Claude 작업자도 이 상태이고, 그 현실성이 회귀 방지에 필요하다.
+ */
+describe('hermetic child environment', () => {
+  /** 진짜 Codex 세션이 부모일 때의 환경. process.env를 건드리지 않고 주입한다. */
+  const CODEX_PARENT = Object.freeze({
+    CODEX_THREAD_ID: 'leaked-thread',
+    CODEX_SESSION_ID: 'leaked-session',
+    CODEX_HOME: 'ambient-codex-home',
+    ORCA_CODEX_HOME: 'ambient-codex-home',
+    ORCA_TERMINAL_HANDLE: 'term_real_coordinator',
+    PATH: 'inherited-path',
   });
+
+  it('strips session-unique Codex markers leaked from the parent session', () => {
+    const env = childEnv(CLAUDE_ENV, CODEX_PARENT);
+    expect(env.CODEX_THREAD_ID).toBeUndefined();
+    expect(env.CODEX_SESSION_ID).toBeUndefined();
+    expect(classifyAgent(env)).toBe('claude');
+  });
+
+  it('preserves ambient Codex markers and inherited environment', () => {
+    const env = childEnv(CLAUDE_ENV, CODEX_PARENT);
+    // 실제 Claude 작업자도 ambient 표식을 물려받은 상태다 — 그 현실성을 유지한다.
+    expect(env.CODEX_HOME).toBe('ambient-codex-home');
+    expect(env.ORCA_CODEX_HOME).toBe('ambient-codex-home');
+    expect(env.PATH).toBe('inherited-path');
+    expect(env.CLAUDECODE).toBe('1');
+    expect(env.CLAUDE_CODE_ENTRYPOINT).toBe('cli');
+    expect(env.ORCA_TERMINAL_HANDLE).toBe('term_claude');
+  });
+
+  it('keeps an explicitly requested Codex session marker so the guard still fails closed', () => {
+    // 정책을 약화시키지 않았다는 확인 — Codex fixture는 부모가 무엇이든 Codex다.
+    expect(classifyAgent(childEnv(CODEX_ENV, CODEX_PARENT))).toBe('codex');
+    expect(classifyAgent(childEnv(CODEX_ENV, { CLAUDECODE: '1' }))).toBe('codex');
+  });
+
+  it('drops a key whose override is null', () => {
+    expect(childEnv({ CODEX_THREAD_ID: null }, CODEX_PARENT).CODEX_THREAD_ID).toBeUndefined();
+  });
+
+  it('defaults its base to the real parent environment', () => {
+    const env = childEnv(CLAUDE_ENV);
+    expect(env.CODEX_THREAD_ID).toBeUndefined();
+    expect(env.CODEX_SESSION_ID).toBeUndefined();
+    expect(classifyAgent(env)).toBe('claude');
+  });
+});
+
+describe('installer argv surface', () => {
+  beforeEach(useGuardFiles);
 
   /**
    * 프로덕션 CLI에는 템플릿 경로를 바꾸는 플래그가 없다. 있으면 저장소 안의 임의
@@ -140,9 +216,7 @@ describe('installer argv surface', () => {
 });
 
 describe('template integrity', () => {
-  beforeEach(() => {
-    installGuardFiles(workspace.primary);
-  });
+  beforeEach(useGuardFiles);
 
   it('refuses a missing template', () => {
     fs.rmSync(templatePath('post-commit'));
@@ -202,9 +276,7 @@ describe('template integrity', () => {
 });
 
 describe('hook installation', () => {
-  beforeEach(() => {
-    installGuardFiles(workspace.primary);
-  });
+  beforeEach(useGuardFiles);
 
   it('deploys the hooks outside the working tree and points Git at that copy', () => {
     expect(install()).toBe(0);
@@ -274,9 +346,7 @@ describe('hook installation', () => {
 });
 
 describe('hook line endings', () => {
-  beforeEach(() => {
-    installGuardFiles(workspace.primary);
-  });
+  beforeEach(useGuardFiles);
 
   /**
    * CRLF로 체크아웃되면 CR을 토큰에 포함시키는 셸에서 `verifier=...`에 CR이 붙어
@@ -327,10 +397,7 @@ describe('hook line endings', () => {
 });
 
 describe('pre-commit hook', () => {
-  beforeEach(() => {
-    installGuardFiles(workspace.primary);
-    expect(install()).toBe(0);
-  });
+  beforeEach(useInstalledGuard);
 
   it('blocks an ungranted Codex implementation commit and leaves HEAD alone', () => {
     const before = git(workspace.primary, ['rev-parse', 'HEAD']);
@@ -444,10 +511,7 @@ export function runGrant() { return 0; }
 `;
 
 describe('deployed runtime isolation', () => {
-  beforeEach(() => {
-    installGuardFiles(workspace.primary);
-    expect(install()).toBe(0);
-  });
+  beforeEach(useInstalledGuard);
 
   /** 작업 트리의 가드 파일을 무력화하고 제품 변경과 함께 stage한다. */
   function tamperAndStageProductChange(relativePath, contents) {
@@ -531,9 +595,7 @@ describe('deployed runtime isolation', () => {
 });
 
 describe('runtime source baseline', () => {
-  beforeEach(() => {
-    installGuardFiles(workspace.primary);
-  });
+  beforeEach(useGuardFiles);
 
   const RUNTIME_SOURCES = [
     'scripts/verify-agent-routing.mjs',
@@ -541,18 +603,16 @@ describe('runtime source baseline', () => {
     'scripts/agent-routing-policy.mjs',
   ];
 
-  it('refuses a missing runtime source', () => {
-    for (const relative of RUNTIME_SOURCES) {
-      cleanup(workspace.root);
-      workspace = makeWorkspace();
-      installGuardFiles(workspace.primary);
-      output.length = 0;
+  // 하나씩 별도 테스트로 둔다 — 한 테스트 안에서 workspace를 세 번 다시 만들면
+  // 동기 구간이 길어져 vitest RPC 타임아웃을 유발하고, 실패 지점도 흐려진다.
+  for (const relative of RUNTIME_SOURCES) {
+    it(`refuses a missing runtime source: ${relative}`, () => {
       fs.rmSync(path.join(workspace.primary, relative));
-      expect(install(), relative).toBe(1);
-      expect(output.join('\n'), relative).toContain(relative);
+      expect(install()).toBe(1);
+      expect(output.join('\n')).toContain(relative);
       expectNotInstalled();
-    }
-  });
+    });
+  }
 
   it('refuses an untracked runtime source', () => {
     git(workspace.primary, ['rm', '-q', '--cached', '--', 'scripts/agent-routing-policy.mjs']);
@@ -585,10 +645,7 @@ describe('runtime source baseline', () => {
 });
 
 describe('tamper resistance', () => {
-  beforeEach(() => {
-    installGuardFiles(workspace.primary);
-    expect(install()).toBe(0);
-  });
+  beforeEach(useInstalledGuard);
 
   it('still runs when Codex stages the deletion of the versioned hook', () => {
     // 배포된 사본이 Git common 디렉터리에 있으므로 커밋으로 지울 수 없다.
@@ -634,10 +691,7 @@ describe('tamper resistance', () => {
 });
 
 describe('post-commit hook', () => {
-  beforeEach(() => {
-    installGuardFiles(workspace.primary);
-    expect(install()).toBe(0);
-  });
+  beforeEach(useInstalledGuard);
 
   /** 예약된 활성 grant를 만든다. consume은 Orca를 부르지 않으므로 스텁으로 충분하다. */
   function reservedGrant() {
