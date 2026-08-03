@@ -396,6 +396,101 @@ describe('purge-couple-data worker', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it('settles a job whose queued object escapes its couple instead of stranding the batch', async () => {
+    // claim_purge_jobs has already moved every claimed row to running. Rejecting a
+    // job without reporting it back leaves that row running for good, because a
+    // claim only ever looks at queued rows — so the couple is never purged, and
+    // neither is any healthy job that happened to share the batch.
+    const foreign = `${COUPLE_B}/visit-b/not-mine.webp`;
+    const healthy = `${COUPLE_B}/visit-b/second.webp`;
+    const completed = [];
+    const storagePaths = [];
+    const fetchImpl = vi.fn(async (url, init) => {
+      const parsed = new URL(url);
+      const body = requestBody(init);
+      if (rpcName(url) === 'claim_purge_jobs') {
+        return jsonResponse(ok({ jobs: [
+          // Job A belongs to couple A but carries an object under couple B.
+          job({ objects: [{ bucket_id: 'visit-photos', object_path: foreign, is_prefix: false }] }),
+          job({ jobId: JOB_B, coupleId: COUPLE_B, objects: [
+            { bucket_id: 'visit-photos', object_path: healthy, is_prefix: false },
+          ] }),
+        ] }));
+      }
+      if (parsed.pathname.startsWith('/storage/v1/object')) {
+        storagePaths.push(...(body.prefixes ?? [body.prefix]));
+        return jsonResponse([{ name: healthy }]);
+      }
+      if (rpcName(url) === 'mark_purge_objects_deleted') {
+        return jsonResponse(ok({ job_id: body.p_job_id, marked: 1 }));
+      }
+      if (rpcName(url) === 'purge_couple_data') {
+        return jsonResponse(ok({ job_id: JOB_B, couple_id: COUPLE_B, visits_deleted: 1 }));
+      }
+      if (rpcName(url) === 'complete_purge_job') {
+        completed.push(body);
+        return jsonResponse(ok({
+          job_id: body.p_job_id,
+          status: body.p_succeeded ? 'succeeded' : 'queued',
+        }));
+      }
+      throw new Error(`unexpected request: ${parsed.pathname}`);
+    });
+
+    const response = await handlerFor(fetchImpl)(request());
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      claimed: 2,
+      succeeded: 1,
+      requeued: 1,
+      unsettled: 0,
+    });
+    // The rejected job is reported, so it goes back on the queue rather than
+    // sitting in running forever...
+    expect(completed).toEqual([
+      { p_job_id: JOB_A, p_succeeded: false, p_error: 'invalid_job_envelope' },
+      { p_job_id: JOB_B, p_succeeded: true, p_error: null },
+    ]);
+    // ...and nothing outside its own couple was deleted on its behalf.
+    expect(storagePaths).toEqual([healthy]);
+    // ...and the batch companion still completed.
+    expect(storagePaths).not.toContain(foreign);
+  });
+
+  it('reports every claimed job so none is left running without an outcome', async () => {
+    const completed = [];
+    const fetchImpl = vi.fn(async (url, init) => {
+      const body = requestBody(init);
+      if (rpcName(url) === 'claim_purge_jobs') {
+        return jsonResponse(ok({ jobs: [
+          // A bucket the worker was never meant to touch.
+          job({ objects: [
+            { bucket_id: 'other-bucket', object_path: `${COUPLE_A}/visit-a/x.webp`, is_prefix: false },
+          ] }),
+          // A prefix sweep disguised as an exact object.
+          job({ jobId: JOB_B, coupleId: COUPLE_B, objects: [
+            { bucket_id: 'visit-photos', object_path: `${COUPLE_B}/`, is_prefix: false },
+          ] }),
+        ] }));
+      }
+      if (rpcName(url) === 'complete_purge_job') {
+        completed.push(body);
+        return jsonResponse(ok({ job_id: body.p_job_id, status: 'failed' }));
+      }
+      throw new Error(`unexpected request: ${new URL(url).pathname}`);
+    });
+
+    const response = await handlerFor(fetchImpl)(request());
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ claimed: 2, failed: 2, unsettled: 0 });
+    expect(completed.map((call) => call.p_job_id)).toEqual([JOB_A, JOB_B]);
+    for (const call of completed) {
+      expect(call).toMatchObject({ p_succeeded: false, p_error: 'invalid_job_envelope' });
+    }
+  });
+
   it('rejects a claim response larger than the requested batch bound', async () => {
     const oversized = Array.from({ length: 11 }, (_, index) => job({
       jobId: `${String(index).padStart(8, '0')}-0000-4000-8000-000000000000`,

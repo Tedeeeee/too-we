@@ -310,12 +310,32 @@ app (PostgREST에 노출되지 않는 내부 스키마)
 visit-photos/<couple_id>/<visit_id>/<filename>
 ```
 
-세 계층에서 같은 규약을 강제한다.
+네 계층에서 같은 규약을 강제한다.
 
+0. **`app.guard_visit_photo_object()` 트리거 (`visit_photos` insert·update)** —
+   **여기가 실제 강제 지점이다.** `register_visit_photo`는 유일한 작성자가 아니다:
+   `authenticated`가 `visit_photos`에 직접 insert 권한을 갖고 있고
+   `visit_photos_insert_uploader` 정책은 `uploader_id = auth.uid()`와 읽을 수 있는
+   방문만 본다. 즉 RPC를 우회한 직접 insert로 **임의의 버킷·임의의 경로**를 적을 수
+   있었다. 그 행은 무해하지 않다 — `disconnect_couple`이 `storage_bucket`과
+   `storage_path`를 그대로 `app.purge_job_objects`에 스냅샷하고, 그것이 service_role
+   워커에게 건네지는 작업 목록이다. 워커는 커플 프리픽스·버킷 밖을 거부하므로 남의
+   파일이 지워지지는 않았지만, **그 거부가 job을 중단시켰고 이미 `running`으로 바뀐
+   job은 다시 집히지 않았다** (아래 "워커가 보고하지 못한 job" 참고).
+   기준은 RPC가 무엇을 검사하는지가 아니라 **워커가 무엇을 받아들이는지**다.
+   `purge.js`의 `validPath()`가 거부하는 것은 전부 여기서도 거부한다 — `.`·`..`
+   세그먼트, 백슬래시, 제어문자, 1024 UTF-16 코드유닛 초과. 길이는
+   `octet_length`로 잰다: `char_length`는 문자 수라서 이모지 600개가 600으로 세어져
+   통과하지만 워커는 1200 코드유닛으로 보고 거부한다. UTF-8 옥텟은 어떤 문자에서도
+   UTF-16 코드유닛보다 적지 않으므로 옥텟 기준이 워커보다 느슨해질 수 없다.
+   커플·방문 세그먼트는 **정규 소문자 uuid 텍스트로** 비교한다 — `app.try_uuid`는
+   중괄호·대문자·하이픈 없는 표기를 같은 uuid로 받지만 워커는 `<couple_id>/`
+   프리픽스를 바이트로 비교하기 때문이다. 위반은 `forbidden`(TW003).
 1. **`register_visit_photo`** — 경로를 `/`로 쪼개 세그먼트가 정확히 3개인지, 1번이 그
    방문의 `couple_id`인지, 2번이 대상 `p_visit_id`인지, 3번이 빈 문자열이 아닌지 본다.
-   어긋나면 `validation_error`. 메타데이터 행이 자기 방문 폴더 밖의 경로를 가리키지
-   못하게 하는 것이 목적이다 — 그게 가능하면 스토리지 정책의 근거가 무너진다.
+   어긋나면 `validation_error`. 클라이언트에게 필드가 붙은 오류를 주기 위한 계층이며,
+   uuid 값 비교(`app.try_uuid`)를 쓰므로 0번보다 느슨하다. 대문자 uuid 경로처럼 0번만
+   잡는 입력은 TW001 대신 TW003으로 거부된다 — 둘 다 거부이므로 결과는 같다.
 2. **storage.objects select / insert** — `couple_id` 세그먼트가 현재 활성 커플이고
    **동시에** `visit_id` 세그먼트가 읽을 수 있는 방문이어야 한다. 규약을 벗어난 경로는
    두 번째 폴더 세그먼트가 없어 `can_read_visit(null)` → false로 거부된다.
@@ -396,6 +416,41 @@ job은 해제 후 최대 24시간 뒤에 실행될 수 있고, 그 사이에 **�
 실패(`p_succeeded = false`)는 `last_error`를 남기고 다시 `queued`가 되며,
 `purge_max_attempts`를 넘기면 `failed`로 세워 두어 운영자가 추적한다.
 
+### 워커가 보고하지 못한 job (W6 수정)
+
+`claim_purge_jobs`는 워커가 아무것도 건드리기 전에 job을 `running`으로 바꾼다. 그런데
+집는 조건이 `status = 'queued'`뿐이어서, **`complete_purge_job`을 부르지 못하고 끝난
+워커의 job은 영구히 `running`에 남았다.** 크래시·함수 타임아웃, 그리고 워커 자신의
+`unsettled` 결과가 모두 여기에 해당한다. 명세는 삭제 실패를 재시도하고 운영상 추적할 수
+있어야 한다고 요구하므로(`최대 24시간 안에 영구 삭제`) 이건 결함이다.
+
+두 방향에서 막는다.
+
+1. **워커 쪽 — 봉투 거부를 job 하나로 격리한다.** 예전에는 `validateClaim`이 배치 전체를
+   먼저 검증해서, 한 job의 객체 하나가 거부되면 `502`로 빠지고 같은 배치에 실려 있던
+   **무관한 커플들의 job까지** 전부 `running`에 남았다. 이제 객체 목록 검증은
+   `processJob` 안에서 job별로 하고, 거부는 `complete_purge_job(job, false,
+   'invalid_job_envelope')`로 보고해 `queued`로 되돌리거나 시도 예산을 다 쓰면 `failed`로
+   세운다. 삭제는 검증 뒤에 시작하므로 잘못된 참조가 하나라도 있는 job은 아무것도 지우지
+   않는다. `job_id` 자체가 uuid가 아닌 봉투는 지목할 대상이 없으므로 여전히 `502`다.
+2. **DB 쪽 — 임대가 만료된 `running` job을 다시 집는다.** 프로세스가 죽어 버린 경우는
+   워커가 보고할 방법이 없으므로 서버가 알아채야 한다. `claim_purge_jobs`가
+   `status = 'queued'`에 더해 `started_at`이 임대 기간보다 오래된 `running` job도
+   후보로 넣는다. 재claim은 같은 `attempts` 증가를 거치므로 `purge_max_attempts`를
+   넘기면 `failed`로 서서 추적 가능해진다. `due_at`은 여전히 조건에 쓰지 않는다.
+
+**임대 기간은 외부 게이트다.** 명세에도 스키마에도 그런 시간 값이 없어서 임의로 정하지
+않았다. `app.config.purge_lease_seconds`가 미해결(`null`, `resolved = false`)인 동안
+재claim은 **전혀 일어나지 않고** 동작은 지금과 완전히 같다 — 죽은 job은 운영자가 볼 수
+있게 `running`에 남는다. 값이 정해지면 마이그레이션 없이 켜진다.
+
+`app.config_resolved_seconds()`가 이 값을 읽는데, `app.config_int`와 달리 `resolved`를
+요구하고 **쓸 수 없는 값은 없는 값으로 취급한다**(fail closed). 분수·범위 밖 값이면
+`null`을 돌려 재claim이 꺼진 상태로 남는다. `'1.5'::integer`는 반올림이 아니라 22P02로
+예외를 내고, 그 예외가 `claim_purge_jobs` 안에서 터지면 워커 전체가 멈추기 때문이다.
+같은 이유로 이 함수는 plpgsql이다 — 평탄화된 SQL에서는 타입·범위 조건이 적용되기 전에
+캐스트가 평가될 수 있다.
+
 `purge_couple_data`는 커플 범위 행을 모두 지우고 `couples` 행만 익명화해서
 (`created_by`·`started_on` null, `purged_at` 기록) 남긴다. job의 외래 키가 유효하게
 유지되고 삭제 감사 흔적이 남는다.
@@ -426,6 +481,7 @@ SQL 안에는 어떤 하드코딩도 없다.
 | `invite_attempt_max` | 10 (임시) | 임시값으로 동작한다 |
 | `invite_attempt_window_seconds` | 600 (임시) | 임시값으로 동작한다 |
 | `purge_max_attempts` | 10 (임시) | 임시값으로 동작한다. null이면 무한 재시도 |
+| `purge_lease_seconds` | **null (미정)** | `running`에 멈춘 purge job을 다른 워커가 다시 집지 않는다. 프로세스가 죽어 사라진 job은 운영자가 손으로 처리해야 하므로, 24시간 SLA를 자동으로 지키려면 값이 필요하다 |
 
 ```sql
 -- 값이 정해진 뒤 (예시) — invite_ttl_seconds는 런치 전 필수
@@ -473,6 +529,10 @@ update storage.buckets set file_size_limit = <bytes>, allowed_mime_types = array
    남아 있을 수 있다. 특히 확인 못 한 것: `('x' || hex)::bit(28)::integer` 캐스트,
    `storage.objects` 정책 안의 `objects.name` 참조, `jsonb - text` 연산자를 쓰는
    사진 컬럼 가드, `foreach ... in array tg_argv`, `string_to_array` 경로 분해.
+   W6에서 추가된 것 중 확인 못 한 것: `strpos(path, e'\\')` 백슬래시 검사,
+   `path ~ '[[:cntrl:]]'` 제어문자 클래스, `octet_length` 경로 상한,
+   `v_segments[1] is distinct from v_couple_id::text` uuid 텍스트 비교,
+   `claim_purge_jobs`의 `make_interval(secs => v_lease)`와 재claim `or` 분기.
    **로컬 스택이 생기면 pgTAP보다 `supabase db reset`(마이그레이션 적용)을 먼저 돌릴 것.**
 4. **storage 정책 마이그레이션이 실패할 수 있다.** `storage.objects`에 정책을 만들려면
    그 테이블의 소유권이 필요하다. 마이그레이션 롤이 부족하면 두 번째 파일만 실패하고
@@ -488,7 +548,19 @@ update storage.buckets set file_size_limit = <bytes>, allowed_mime_types = array
    받지 않는 것도 mock의 `saveFiveSecondRecord` 시그니처와 다르다.
 7. **`replenishPendingRecord()`는 mock 전용이다.** 실제 백엔드로 바꿀 때 함께 지운다
    (`CLAUDE.md`에 이미 적혀 있다).
-8. **purge 워커 배포와 스케줄은 아직 외부 게이트다.** 구현은
+8. **`purge_lease_seconds`가 미설정이면 죽은 purge job이 자동 복구되지 않는다.**
+   워커가 봉투를 거부하는 경우는 이제 job 단위로 보고돼 재큐잉되지만, 프로세스 자체가
+   죽은 경우(크래시·함수 타임아웃)는 서버가 임대 만료로 알아채야 한다. 임대 기간이
+   명세에도 스키마에도 없어 임의로 정하지 않았으므로, 값이 정해지기 전까지 그런 job은
+   `running`에 남아 **운영자가 손으로 되돌려야 하고 24시간 SLA를 자동으로 지키지
+   못한다.** 값만 정하면 마이그레이션 없이 켜진다.
+9. **`app.config_int`는 여전히 분수 값에서 예외를 낸다.** W1에서 온 함수이고
+   `(value #>> '{}')::integer`를 `jsonb_typeof = 'number'`만 보고 캐스트하므로,
+   `invite_attempt_max`나 `purge_max_attempts`에 `10.5`가 들어가면 22P02가 난다. 지금
+   시드는 모두 정수이고 이 값은 운영자만 바꿀 수 있어 공격 경로는 아니다. W6에서 새로
+   추가한 `app.config_resolved_seconds`는 같은 함정을 fail closed로 처리했고, 기존
+   함수를 같은 방식으로 고칠지는 코디네이터 판단으로 남겨 둔다.
+10. **purge 워커 배포와 스케줄은 아직 외부 게이트다.** 구현은
    `supabase/functions/purge-couple-data`에 있지만 배포·서버 bearer 보관·반복 호출은 하지
    않았다. 게이트가 닫힌 동안 job은 `queued`에 머무르므로 24시간 SLA를 지키려면 운영
    환경에서 이 게이트를 완료해야 한다.

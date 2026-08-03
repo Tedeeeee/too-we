@@ -593,6 +593,20 @@ export function functionsNamed(name) {
   return functions().filter((f) => f.name === key);
 }
 
+/**
+ * The definition a fresh `supabase db reset` actually ends up with.
+ *
+ * Migrations apply in filename order and a later `create or replace` supersedes
+ * an earlier one, so for a function declared more than once the effective
+ * declaration is the last. Asserting on `functionsNamed(...)[0]` instead would
+ * read superseded text, and a later migration could weaken the live function
+ * without any contract noticing.
+ */
+export function effectiveFunction(name) {
+  const all = functionsNamed(name);
+  return all.length === 0 ? undefined : all[all.length - 1];
+}
+
 function privilegeStatements(verb) {
   const out = [];
   const re = new RegExp(`^${verb}\\b`, 'i');
