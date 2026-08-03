@@ -216,17 +216,58 @@ describe('AppProvider actions', () => {
     expect(appState.couple).toEqual(RESTORED_COUPLE);
   });
 
-  it('기록 저장 뒤 새 목록 조회가 실패해도 이전 기록을 비우거나 바꾸지 않는다', async () => {
+  it('불확실한 기록 쓰기 실패는 이전 목록을 보존하고 같은 입력·키 재시도로 수렴한다', async () => {
     await renderReadyProvider();
     const networkError = new AppError(ERROR_CODES.network);
+    const input = Object.freeze({
+      place: Object.freeze({ id: 'kakao-2', name: '새 장소', provider: 'kakao' }),
+      date: '2026-05-04T10:00:00Z',
+      requestKey: 'visit-intent-write-retry',
+    });
+    const convergedRecords = [...RESTORED_RECORDS, { id: 'record-2', pending: true }];
+    api.saveFiveSecondRecord
+      .mockRejectedValueOnce(networkError)
+      .mockResolvedValueOnce({ id: 'record-2' });
+
+    await expect(appState.saveFiveSecondRecord(input)).rejects.toBe(networkError);
+
+    expect(appState.records).toEqual(RESTORED_RECORDS);
+    expect(api.getRecords).toHaveBeenCalledTimes(1);
+
+    api.getRecords.mockResolvedValue(convergedRecords);
+    await act(async () => {
+      await appState.saveFiveSecondRecord(input);
+    });
+
+    expect(api.saveFiveSecondRecord).toHaveBeenNthCalledWith(1, input);
+    expect(api.saveFiveSecondRecord).toHaveBeenNthCalledWith(2, input);
+    expect(appState.records).toEqual(convergedRecords);
+  });
+
+  it('기록 저장 뒤 새 목록 조회 실패도 이전 목록을 보존하고 같은 입력·키 재시도로 수렴한다', async () => {
+    await renderReadyProvider();
+    const networkError = new AppError(ERROR_CODES.network);
+    const input = Object.freeze({
+      place: Object.freeze({ id: 'kakao-2', name: '새 장소', provider: 'kakao' }),
+      date: '2026-05-04T10:00:00Z',
+      requestKey: 'visit-intent-refresh-retry',
+    });
+    const convergedRecords = [...RESTORED_RECORDS, { id: 'record-2', pending: true }];
     api.saveFiveSecondRecord.mockResolvedValue({ id: 'record-2' });
     api.getRecords.mockRejectedValueOnce(networkError);
 
-    await expect(appState.saveFiveSecondRecord({ place: { name: '새 장소' } })).rejects.toBe(
-      networkError,
-    );
+    await expect(appState.saveFiveSecondRecord(input)).rejects.toBe(networkError);
 
     expect(appState.records).toEqual(RESTORED_RECORDS);
+
+    api.getRecords.mockResolvedValue(convergedRecords);
+    await act(async () => {
+      await appState.saveFiveSecondRecord(input);
+    });
+
+    expect(api.saveFiveSecondRecord).toHaveBeenNthCalledWith(1, input);
+    expect(api.saveFiveSecondRecord).toHaveBeenNthCalledWith(2, input);
+    expect(appState.records).toEqual(convergedRecords);
   });
 
   it('승인된 초대 재발급 facade를 action으로 노출하고 성공 결과만 반영한다', async () => {

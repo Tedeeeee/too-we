@@ -110,14 +110,6 @@ export function createVisitsRepository({ getClient, session, requestKey, now, pl
       const visitId = created.data?.visit_id;
       if (!visitId) throw new AppError(ERROR_CODES.unknown, { cause: created });
 
-      if (text !== null || rating !== null) {
-        await callRpc(getClient(), 'upsert_my_visit_entry', {
-          p_visit_id: visitId,
-          p_text: text,
-          p_rating: rating,
-        });
-      }
-
       return getRecord(visitId);
     },
 
