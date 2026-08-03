@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { palette, fonts, shadows } from '@/styles/tokens';
 import { uiSvg } from '@assets/svg';
 
@@ -11,10 +11,32 @@ import { uiSvg } from '@assets/svg';
  */
 export default function ProfileEditSheet({ name, onClose, onSave, onDisconnect }) {
   const [draft, setDraft] = useState(name);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+  const saveInFlightRef = useRef(false);
+  const normalizedDraft = draft.trim();
+  const canSave = normalizedDraft.length > 0 && Array.from(normalizedDraft).length <= 12;
 
-  const pill = (label, onClick, filled) => (
+  const handleSave = async () => {
+    if (!canSave || saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
+    setSaving(true);
+    setSaveError(false);
+    try {
+      await onSave(normalizedDraft);
+    } catch {
+      setSaveError(true);
+    } finally {
+      saveInFlightRef.current = false;
+      setSaving(false);
+    }
+  };
+
+  const pill = (label, onClick, filled, disabled = false) => (
     <button
+      type="button"
       onClick={onClick}
+      disabled={disabled}
       style={{
         height: 38,
         flexGrow: 1,
@@ -30,7 +52,8 @@ export default function ProfileEditSheet({ name, onClose, onSave, onDisconnect }
         fontWeight: 500,
         lineHeight: '30px',
         color: filled ? palette.onOliveAlt : palette.olive,
-        cursor: 'pointer',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.65 : 1,
       }}
     >
       {label}
@@ -40,10 +63,14 @@ export default function ProfileEditSheet({ name, onClose, onSave, onDisconnect }
   return (
     <>
       <div
-        onClick={onClose}
-        style={{ position: 'absolute', left: 0, top: 0, width: 402, height: 874, background: palette.dimModal, cursor: 'pointer' }}
+        aria-hidden="true"
+        onClick={saving ? undefined : onClose}
+        style={{ position: 'absolute', left: 0, top: 0, width: 402, height: 874, background: palette.dimModal, cursor: saving ? 'wait' : 'pointer' }}
       />
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="profile-edit-title"
         style={{
           position: 'absolute',
           left: 16,
@@ -64,6 +91,7 @@ export default function ProfileEditSheet({ name, onClose, onSave, onDisconnect }
       >
         <div style={{ height: 25, display: 'flex', alignItems: 'center', justifyContent: 'center', alignSelf: 'stretch' }}>
           <span
+            id="profile-edit-title"
             style={{
               fontFamily: fonts.hand,
               fontSize: 32,
@@ -81,6 +109,8 @@ export default function ProfileEditSheet({ name, onClose, onSave, onDisconnect }
           {/* 프로필 사진 + 카메라 배지 (배지가 사진 우하단에 24px 겹친다) */}
           <div style={{ width: 108, height: 100, display: 'flex', flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end' }}>
             <div
+              role="img"
+              aria-label={normalizedDraft ? `${normalizedDraft} 프로필` : '등록된 이름 없음'}
               style={{
                 width: 100,
                 height: 100,
@@ -95,10 +125,12 @@ export default function ProfileEditSheet({ name, onClose, onSave, onDisconnect }
                 flexShrink: 0,
               }}
             >
-              {draft.slice(0, 1)}
+              {Array.from(normalizedDraft)[0] || '?'}
             </div>
             <button
-              aria-label="프로필 사진 변경"
+              type="button"
+              aria-label="프로필 사진 변경은 아직 지원하지 않아요"
+              disabled
               style={{
                 width: 32,
                 height: 32,
@@ -110,7 +142,7 @@ export default function ProfileEditSheet({ name, onClose, onSave, onDisconnect }
                 alignItems: 'center',
                 justifyContent: 'center',
                 flexShrink: 0,
-                cursor: 'pointer',
+                cursor: 'not-allowed',
               }}
             >
               {/* camera.svg는 fill이 #6E665E로 시안 색과 같아 그대로 쓴다 */}
@@ -124,9 +156,13 @@ export default function ProfileEditSheet({ name, onClose, onSave, onDisconnect }
             </div>
             <input
               value={draft}
-              onChange={(e) => setDraft(e.target.value.slice(0, 12))}
+              onChange={(e) => {
+                setDraft(Array.from(e.target.value).slice(0, 12).join(''));
+                setSaveError(false);
+              }}
+              disabled={saving}
               maxLength={12}
-              aria-label="이름"
+              aria-label="내 이름"
               style={{
                 height: 40,
                 borderRadius: 16,
@@ -144,20 +180,44 @@ export default function ProfileEditSheet({ name, onClose, onSave, onDisconnect }
           </div>
 
           <div style={{ height: 38, display: 'flex', flexDirection: 'row', gap: 8, alignSelf: 'stretch' }}>
-            {pill('취소하기', onClose, false)}
-            {pill('수정하기', () => onSave(draft.trim() || name), true)}
+            {pill('취소하기', onClose, false, saving)}
+            {pill(saving ? '저장 중…' : saveError ? '다시 시도' : '수정하기', handleSave, true, !canSave || saving)}
           </div>
         </div>
 
+        {saveError && (
+          <p
+            role="alert"
+            style={{
+              position: 'absolute',
+              left: 24,
+              top: 306,
+              width: 322,
+              margin: 0,
+              textAlign: 'center',
+              fontFamily: fonts.sans,
+              fontSize: 12,
+              lineHeight: 1.35,
+              color: palette.textStrong,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            이름을 저장하지 못했어요. 그대로 두었어요.
+          </p>
+        )}
+
         <button
+          type="button"
           onClick={onDisconnect}
+          disabled={saving}
           style={{
             fontFamily: fonts.hand,
             fontSize: 20,
             lineHeight: '100%',
             color: palette.textStrong,
             textDecoration: 'underline',
-            cursor: 'pointer',
+            cursor: saving ? 'not-allowed' : 'pointer',
+            opacity: saving ? 0.65 : 1,
           }}
         >
           연결해제
