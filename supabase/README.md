@@ -400,6 +400,19 @@ job은 해제 후 최대 24시간 뒤에 실행될 수 있고, 그 사이에 **�
 (`created_by`·`started_on` null, `purged_at` 기록) 남긴다. job의 외래 키가 유효하게
 유지되고 삭제 감사 흔적이 남는다.
 
+### `purge-couple-data` Edge Function 운영 게이트
+
+서버 전용 워커는 `supabase/functions/purge-couple-data`에 있다. 배포 함수 이름은
+`purge-couple-data`이며 배포 명령은 `supabase functions deploy purge-couple-data`다.
+호출은 `POST`와 `Authorization: Bearer ...`가 필요하고, 같은 프로젝트의 서버용
+`service_role` bearer만 사용한다. 워커는 받은 bearer를 `SUPABASE_URL`과 호출 URL이
+가리키는 같은 프로젝트의 REST·Storage 요청에만 그대로 전달하므로 브라우저 JWT로는
+service-role 전용 purge RPC를 실행할 수 없다.
+
+배포, bearer 보관, 즉시 실행되는 반복 스케줄 등록과 실행 주기는 외부 운영 게이트다.
+저장소에는 값이나 새 루트 환경 변수를 추가하지 않는다. 이 게이트가 결정되기 전에는
+배포하거나 스케줄을 만들지 않는다.
+
 ## 외부 게이트 대기 값
 
 `app.config`에 `resolved = false`로 들어 있다. 마이그레이션 없이 값만 갱신할 수 있고,
@@ -475,7 +488,7 @@ update storage.buckets set file_size_limit = <bytes>, allowed_mime_types = array
    받지 않는 것도 mock의 `saveFiveSecondRecord` 시그니처와 다르다.
 7. **`replenishPendingRecord()`는 mock 전용이다.** 실제 백엔드로 바꿀 때 함께 지운다
    (`CLAUDE.md`에 이미 적혀 있다).
-8. **purge 워커가 없으면 파일이 남는다.** `purge_couple_data`는 DB 행만 지운다. 스토리지
-   객체 삭제는 service_role로 Storage API를 호출하는 외부 워커(cron/edge function)의
-   몫이고 아직 없다. 워커가 없으면 job은 `queued`에 머물고 `complete_purge_job`이
-   `purge_incomplete`를 계속 반환한다 — 24시간 SLA를 지키려면 이 워커가 필요하다.
+8. **purge 워커 배포와 스케줄은 아직 외부 게이트다.** 구현은
+   `supabase/functions/purge-couple-data`에 있지만 배포·서버 bearer 보관·반복 호출은 하지
+   않았다. 게이트가 닫힌 동안 job은 `queued`에 머무르므로 24시간 SLA를 지키려면 운영
+   환경에서 이 게이트를 완료해야 한다.
