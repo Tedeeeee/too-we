@@ -56,8 +56,12 @@ export default function FlowerPickSheet({
             {FLOWERS.map((f) => {
               const active = selected === f.key;
               return (
-                <div
+                <button
                   key={f.key}
+                  type="button"
+                  aria-label={`${f.name} 꽃갈피`}
+                  aria-pressed={active}
+                  disabled={saving}
                   onClick={() => onSelect(active ? null : f.key)}
                   style={{
                     width: 173,
@@ -85,7 +89,7 @@ export default function FlowerPickSheet({
                       objectFit: 'contain',
                     }}
                   />
-                </div>
+                </button>
               );
             })}
           </div>
@@ -123,8 +127,28 @@ export default function FlowerPickSheet({
           cursor: saving ? 'wait' : 'pointer',
         }}
       >
-        {saving ? '저장 중' : '선택하기'}
+        {saving ? '저장 중…' : error ? '다시 시도' : '선택하기'}
       </button>
+      {saving && (
+        <p
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+          style={{
+            position: 'absolute',
+            left: 16,
+            top: 700,
+            width: 370,
+            margin: 0,
+            textAlign: 'center',
+            fontFamily: fonts.hand,
+            fontSize: 14,
+            color: palette.textMuted,
+          }}
+        >
+          꽃갈피를 저장하고 있어요…
+        </p>
+      )}
       {error && (
         <div
           role="alert"

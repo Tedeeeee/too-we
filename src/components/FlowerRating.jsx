@@ -21,6 +21,7 @@ export default function FlowerRating({
   activeColor = palette.pink,
   inactiveColor = palette.beige,
   onChange,
+  allowClear = false,
   style,
 }) {
   return (
@@ -34,22 +35,37 @@ export default function FlowerRating({
         ...style,
       }}
     >
-      {Array.from({ length: max }).map((_, i) => (
-        <span
-          key={i}
-          onClick={onChange ? () => onChange(i + 1) : undefined}
-          style={{
-            display: 'block',
-            cursor: onChange ? 'pointer' : 'default',
-          }}
-        >
+      {Array.from({ length: max }).map((_, i) => {
+        const nextValue = i + 1;
+        const icon = (
           <MaskIcon
             src={etcSvg.ratingFlower}
             size={size}
             color={i < value ? activeColor : inactiveColor}
           />
-        </span>
-      ))}
+        );
+
+        if (!onChange) {
+          return (
+            <span key={nextValue} style={{ display: 'block' }}>
+              {icon}
+            </span>
+          );
+        }
+
+        return (
+          <button
+            key={nextValue}
+            type="button"
+            aria-label={`${nextValue}점`}
+            aria-pressed={value === nextValue}
+            onClick={() => onChange(allowClear && value === nextValue ? 0 : nextValue)}
+            style={{ display: 'block', cursor: 'pointer' }}
+          >
+            {icon}
+          </button>
+        );
+      })}
     </div>
   );
 }

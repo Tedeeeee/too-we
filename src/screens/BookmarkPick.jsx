@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router';
 import { palette } from '@/styles/tokens';
 import Screen from '@/components/Screen';
 import FlowerPickSheet from '@/components/FlowerPickSheet';
 import { FLOWERS } from '@/data/fixtures';
 import { useApp, useRecord } from '@/data/store';
+import { toAppError, userMessage } from '@/data/errors';
 
 /**
  * 꽃갈피 선택 화면 (딤 배경 + 바텀시트).
@@ -22,6 +23,7 @@ export default function BookmarkPick() {
   ));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const inFlightRef = useRef(false);
 
   if (!recordId) return <Navigate to="/" replace />;
   if (!ready) return null;
@@ -29,6 +31,8 @@ export default function BookmarkPick() {
 
   const confirm = async () => {
     if (saving) return;
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setSaving(true);
     setError('');
     try {
@@ -37,16 +41,20 @@ export default function BookmarkPick() {
       navigate('/', { replace: true });
       navigate(`/place/${recordId}`);
     } catch (saveError) {
-      console.error(saveError);
-      setError('저장하지 못했어요. 다시 시도해 주세요.');
+      const appError = toAppError(saveError);
+      setError(userMessage(appError.code));
     } finally {
+      inFlightRef.current = false;
       setSaving(false);
     }
   };
 
   return (
     <Screen>
-      <div
+      <button
+        type="button"
+        aria-label="꽃갈피 선택 닫기"
+        disabled={saving}
         onClick={() => navigate(-1)}
         style={{ position: 'absolute', left: 0, top: 0, width: 402, height: 874, background: palette.dim, cursor: 'pointer' }}
       />
