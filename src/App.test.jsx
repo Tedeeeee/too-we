@@ -10,6 +10,7 @@ import App from './App';
 vi.mock('@/data/api', () => ({
   getCouple: vi.fn(),
   getRecords: vi.fn(),
+  getWishlist: vi.fn(),
   createCouple: vi.fn(),
   reissueCoupleInvite: vi.fn(),
   connectWithCode: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock('@/data/api', () => ({
   saveFiveSecondRecord: vi.fn(),
   setRecordFlower: vi.fn(),
   updateRecord: vi.fn(),
+  disconnectCouple: vi.fn(),
 }));
 
 vi.mock('@/screens/OnboardingIntro', () => ({
@@ -32,7 +34,22 @@ vi.mock('@/screens/RecordNew', () => ({ default: () => <div>기록 화면</div> 
 vi.mock('@/screens/BookmarkPick', () => ({ default: () => <div>꽃갈피 화면</div> }));
 vi.mock('@/screens/PlaceDetailScreen', () => ({ default: () => <div>상세 화면</div> }));
 vi.mock('@/screens/RecordEdit', () => ({ default: () => <div>수정 화면</div> }));
-vi.mock('@/screens/MyPage', () => ({ default: () => <div>마이페이지 화면</div> }));
+vi.mock('@/screens/MyPage', async () => {
+  const { useApp } = await import('@/data/store');
+  return {
+    default: () => {
+      const { disconnectCouple } = useApp();
+      return (
+        <div>
+          <span>마이페이지 화면</span>
+          <button type="button" onClick={() => disconnectCouple()}>
+            테스트 연결 해제
+          </button>
+        </div>
+      );
+    },
+  };
+});
 vi.mock('@/screens/Wishlist', () => ({ default: () => <div>위시리스트 화면</div> }));
 
 const NO_COUPLE = {
@@ -70,12 +87,14 @@ function renderApp(path = '/') {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  api.getWishlist.mockResolvedValue([]);
 });
 
 describe('startup routing', () => {
   it('첫 실행 데이터를 모두 복원할 때까지 접근 가능한 로딩 화면을 표시한다', () => {
     api.getCouple.mockReturnValue(deferred().promise);
     api.getRecords.mockReturnValue(deferred().promise);
+    api.getWishlist.mockReturnValue(deferred().promise);
 
     renderApp();
 
@@ -159,5 +178,21 @@ describe('startup error recovery', () => {
 
     await waitFor(() => expect(screen.getByRole('status')).toBeInTheDocument());
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('disconnect routing', () => {
+  it('store가 연결을 철회하면 현재 mypage 접근을 즉시 온보딩으로 되돌린다', async () => {
+    const user = userEvent.setup();
+    api.getCouple.mockResolvedValue(ONBOARDED_COUPLE);
+    api.getRecords.mockResolvedValue([]);
+    api.disconnectCouple.mockResolvedValue({ disconnected: true, coupleId: 'couple-1' });
+
+    renderApp('/mypage');
+
+    await user.click(await screen.findByRole('button', { name: '테스트 연결 해제' }));
+
+    expect(await screen.findByText('온보딩 화면')).toBeInTheDocument();
+    expect(api.disconnectCouple).toHaveBeenCalledTimes(1);
   });
 });
