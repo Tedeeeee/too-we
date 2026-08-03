@@ -224,6 +224,34 @@ describe('data API facade', () => {
     await expect(api.getPlace('kakao-api-1')).resolves.toEqual(places[0]);
   });
 
+  it.each([
+    [undefined],
+    [null],
+    ['   '],
+    [{ keyword: '   ' }],
+  ])('빈 장소 검색 입력 %s는 SDK를 부르지 않고 빈 목록을 준다', async (query) => {
+    const Places = vi.fn();
+    globalThis.kakao = { maps: { services: { Places } } };
+
+    await expect(api.getNearbyPlaces(query)).resolves.toEqual([]);
+    expect(Places).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [[]],
+    [42],
+    [{ keyword: 42 }],
+  ])('잘못된 장소 검색 입력 %s는 SDK를 부르지 않고 validation AppError로 거부한다', async (query) => {
+    const Places = vi.fn();
+    globalThis.kakao = { maps: { services: { Places } } };
+
+    await expect(api.getNearbyPlaces(query)).rejects.toMatchObject({
+      code: ERROR_CODES.validation,
+      retryable: false,
+    });
+    expect(Places).not.toHaveBeenCalled();
+  });
+
   it('빈 장소 API와 저장 모델이 없는 설정 API는 픽스처를 만들지 않는다', async () => {
     const client = createFakeSupabaseClient({ userId: ME, tables: {}, rpc: {} });
     __setSupabaseClient(client);

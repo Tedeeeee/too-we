@@ -32,15 +32,24 @@ describe('createPlaceSearchRepository — 어댑터 주입', () => {
     expect(query).toEqual(original);
   });
 
-  it('빈 키워드는 어댑터를 부르지 않고 빈 목록을 준다', async () => {
+  it.each([
+    [undefined],
+    [null],
+    ['   '],
+    [{ keyword: '   ' }],
+  ])('빈 검색 입력 %s는 어댑터를 부르지 않고 빈 목록을 준다', async (query) => {
     const searchPlaces = vi.fn();
     const places = createPlaceSearchRepository({ adapter: { searchPlaces } });
 
-    await expect(places.getNearbyPlaces({ keyword: '   ' })).resolves.toEqual([]);
+    await expect(places.getNearbyPlaces(query)).resolves.toEqual([]);
     expect(searchPlaces).not.toHaveBeenCalled();
   });
 
-  it.each([[[]], [42], [{ keyword: 42 }]])('잘못된 검색 입력 %s는 validation AppError로 거부한다', async (query) => {
+  it.each([
+    [[]],
+    [42],
+    [{ keyword: 42 }],
+  ])('잘못된 검색 입력 %s는 validation AppError로 거부한다', async (query) => {
     const searchPlaces = vi.fn();
     const places = createPlaceSearchRepository({ adapter: { searchPlaces } });
 

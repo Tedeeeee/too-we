@@ -13,18 +13,30 @@ const readyMaps = () => ({
 });
 
 const createDocumentHarness = () => {
-  let appendedScript = null;
-  const script = { remove: vi.fn() };
+  const scripts = [];
+  const appendedScripts = [];
   const document = {
-    createElement: vi.fn(() => script),
+    createElement: vi.fn(() => {
+      const script = { remove: vi.fn() };
+      scripts.push(script);
+      return script;
+    }),
     head: {
       appendChild: vi.fn((node) => {
-        appendedScript = node;
+        appendedScripts.push(node);
       }),
     },
   };
 
-  return { document, script, getAppendedScript: () => appendedScript };
+  return {
+    document,
+    scripts,
+    appendedScripts,
+    get script() {
+      return scripts.at(-1);
+    },
+    getAppendedScript: () => appendedScripts.at(-1),
+  };
 };
 
 describe('createKakaoMapsSdkLoader', () => {
@@ -125,6 +137,50 @@ describe('createKakaoMapsSdkLoader', () => {
     });
     expect(error.cause?.message).not.toContain(FAKE_MAP_KEY);
     expect(error.message).not.toContain(FAKE_MAP_KEY);
+  });
+
+  it('network 실패 뒤 pending을 비우고 새 script 하나로 재시도한다', async () => {
+    const globalObject = {};
+    const harness = createDocumentHarness();
+    const loadSdk = createKakaoMapsSdkLoader({
+      getEnv: () => ({ [KAKAO_MAP_KEY_ENV]: FAKE_MAP_KEY }),
+      getDocument: () => harness.document,
+      getGlobal: () => globalObject,
+    });
+
+    const first = loadSdk();
+    const sameAttempt = loadSdk();
+    const firstScript = harness.script;
+    expect(harness.appendedScripts).toEqual([firstScript]);
+
+    firstScript.onerror({ target: firstScript });
+    const firstErrors = await Promise.all([
+      first.catch((error) => error),
+      sameAttempt.catch((error) => error),
+    ]);
+    expect(firstErrors).toEqual([
+      expect.objectContaining({ code: ERROR_CODES.network, retryable: true }),
+      expect.objectContaining({ code: ERROR_CODES.network, retryable: true }),
+    ]);
+    for (const error of firstErrors) {
+      expect(error.message).not.toContain(FAKE_MAP_KEY);
+      expect(error.cause?.message).not.toContain(FAKE_MAP_KEY);
+    }
+    expect(firstScript.remove).toHaveBeenCalledTimes(1);
+
+    const retry = loadSdk();
+    const sameRetry = loadSdk();
+    const retryScript = harness.script;
+    expect(retryScript).not.toBe(firstScript);
+    expect(harness.appendedScripts).toEqual([firstScript, retryScript]);
+
+    const maps = readyMaps();
+    globalObject.kakao = { maps };
+    retryScript.onload();
+
+    await expect(Promise.all([retry, sameRetry])).resolves.toEqual([maps, maps]);
+    expect(harness.document.createElement).toHaveBeenCalledTimes(2);
+    expect(harness.document.head.appendChild).toHaveBeenCalledTimes(2);
   });
 
   it('script가 끝나도 services API가 없으면 configuration AppError로 거부한다', async () => {
