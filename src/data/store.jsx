@@ -2,41 +2,90 @@
  * 앱 전역 상태 (mock 데이터 레이어 위의 React Context).
  * 화면은 useApp()으로 상태/액션을 쓰고, 데이터 접근은 전부 api.js를 경유한다.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import * as api from './api';
+import { toAppError } from './errors';
 
 const AppContext = createContext(null);
 
 export function AppProvider({ children }) {
   const [couple, setCouple] = useState(null);
   const [records, setRecords] = useState([]);
-  const [ready, setReady] = useState(false);
+  const [bootstrapStatus, setBootstrapStatus] = useState('loading');
+  const [bootstrapError, setBootstrapError] = useState(null);
+  const mountedRef = useRef(false);
+  const bootstrapAttemptRef = useRef(0);
 
-  useEffect(() => {
-    Promise.all([api.getCouple(), api.getRecords()]).then(([c, r]) => {
-      setCouple(c);
-      setRecords(r);
-      setReady(true);
-    });
+  const bootstrap = useCallback(async () => {
+    const attempt = bootstrapAttemptRef.current + 1;
+    bootstrapAttemptRef.current = attempt;
+    setBootstrapError(null);
+    setBootstrapStatus('loading');
+
+    try {
+      const [nextCouple, nextRecords] = await Promise.all([
+        api.getCouple(),
+        api.getRecords(),
+      ]);
+      if (!mountedRef.current || attempt !== bootstrapAttemptRef.current) return;
+
+      setCouple(nextCouple);
+      setRecords(nextRecords);
+      setBootstrapStatus('ready');
+    } catch (error) {
+      if (!mountedRef.current || attempt !== bootstrapAttemptRef.current) return;
+
+      setBootstrapError(toAppError(error));
+      setBootstrapStatus('error');
+    }
   }, []);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    bootstrap();
+
+    return () => {
+      mountedRef.current = false;
+      bootstrapAttemptRef.current += 1;
+    };
+  }, [bootstrap]);
+
+  const retryBootstrap = useCallback(() => bootstrap(), [bootstrap]);
+
   const refreshRecords = useCallback(async () => {
-    setRecords(await api.getRecords());
+    const nextRecords = await api.getRecords();
+    if (mountedRef.current) setRecords(nextRecords);
   }, []);
 
   const actions = useMemo(
     () => ({
       async startNewCouple() {
-        setCouple(await api.createCouple());
+        const nextCouple = await api.createCouple();
+        if (mountedRef.current) setCouple(nextCouple);
       },
       async connectWithCode(code) {
-        setCouple(await api.connectWithCode(code));
+        const nextCouple = await api.connectWithCode(code);
+        if (mountedRef.current) setCouple(nextCouple);
       },
       async setMyName(name) {
-        setCouple(await api.setMyName(name));
+        const nextCouple = await api.setMyName(name);
+        if (mountedRef.current) setCouple(nextCouple);
       },
       async completeOnboarding() {
-        setCouple(await api.completeOnboarding());
+        const nextCouple = await api.completeOnboarding();
+        if (mountedRef.current) setCouple(nextCouple);
+      },
+      async reissueCoupleInvite(options) {
+        const nextCouple = await api.reissueCoupleInvite(options);
+        if (mountedRef.current) setCouple(nextCouple);
       },
       async saveFiveSecondRecord(input) {
         const rec = await api.saveFiveSecondRecord(input);
@@ -57,9 +106,26 @@ export function AppProvider({ children }) {
     [refreshRecords],
   );
 
+  const ready = bootstrapStatus === 'ready';
   const value = useMemo(
-    () => ({ ready, couple, records, ...actions }),
-    [ready, couple, records, actions],
+    () => ({
+      ready,
+      couple,
+      records,
+      bootstrapStatus,
+      bootstrapError,
+      retryBootstrap,
+      ...actions,
+    }),
+    [
+      ready,
+      couple,
+      records,
+      bootstrapStatus,
+      bootstrapError,
+      retryBootstrap,
+      actions,
+    ],
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
