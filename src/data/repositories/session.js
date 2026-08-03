@@ -2,17 +2,12 @@ import { AppError, ERROR_CODES } from '../errors';
 import { toRepositoryError } from './error-mapping';
 
 export function createSessionRepository({ getClient }) {
+  let activeClient = null;
   let userId = null;
   let pending = null;
+  let generation = 0;
 
-  const acquireUserId = async () => {
-    let client;
-    try {
-      client = getClient();
-    } catch (error) {
-      throw toRepositoryError(error, { fallback: ERROR_CODES.configuration });
-    }
-
+  const acquireUserId = async (client) => {
     let current;
     try {
       current = await client.auth.getSession();
@@ -24,10 +19,7 @@ export function createSessionRepository({ getClient }) {
     }
 
     const existingId = current?.data?.session?.user?.id;
-    if (existingId) {
-      userId = existingId;
-      return userId;
-    }
+    if (existingId) return existingId;
 
     let signedIn;
     try {
@@ -44,24 +36,54 @@ export function createSessionRepository({ getClient }) {
       throw new AppError(ERROR_CODES.auth, { cause: signedIn });
     }
 
-    userId = signedInId;
-    return userId;
+    return signedInId;
+  };
+
+  const ensureUserId = () => {
+    let client;
+    try {
+      client = getClient();
+    } catch (error) {
+      return Promise.reject(
+        toRepositoryError(error, { fallback: ERROR_CODES.configuration }),
+      );
+    }
+
+    if (client !== activeClient) {
+      activeClient = client;
+      userId = null;
+      pending = null;
+      generation += 1;
+    }
+    if (userId) return Promise.resolve(userId);
+    if (pending) return pending;
+
+    const currentGeneration = generation;
+    let acquisition;
+    acquisition = acquireUserId(client)
+      .then((acquiredUserId) => {
+        if (generation !== currentGeneration || activeClient !== client) {
+          if (pending === acquisition) pending = null;
+          return ensureUserId();
+        }
+        userId = acquiredUserId;
+        return userId;
+      })
+      .finally(() => {
+        if (pending === acquisition) pending = null;
+      });
+    pending = acquisition;
+    return pending;
   };
 
   return {
-    ensureUserId() {
-      if (userId) return Promise.resolve(userId);
-      if (pending) return pending;
-
-      pending = acquireUserId().finally(() => {
-        pending = null;
-      });
-      return pending;
-    },
+    ensureUserId,
 
     reset() {
+      activeClient = null;
       userId = null;
       pending = null;
+      generation += 1;
     },
   };
 }

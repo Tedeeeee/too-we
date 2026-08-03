@@ -296,6 +296,40 @@ describe('mapVisit — 화면 기록 셰이프', () => {
     expect(record.entries).toHaveLength(1);
   });
 
+  it('내 rating-only는 대기 상태로 숨기고 상대 rating-only는 읽기 전용으로 보여준다', () => {
+    const record = mapVisit(
+      visitRow({
+        visit_entries: [
+          { author_id: ME, note: null, rating: 3 },
+          { author_id: PARTNER, note: null, rating: 5 },
+        ],
+      }),
+      ME,
+    );
+
+    expect(record.rating).toBe(3);
+    expect(record.entries).toEqual([
+      {
+        memberId: 'partner',
+        authorUserId: PARTNER,
+        text: null,
+        rating: 5,
+        readOnly: true,
+      },
+    ]);
+  });
+
+  it('상대 한 줄과 별점이 모두 없으면 상대 entry를 만들지 않는다', () => {
+    const record = mapVisit(
+      visitRow({
+        visit_entries: [{ author_id: PARTNER, note: null, rating: null }],
+      }),
+      ME,
+    );
+
+    expect(record.entries).toEqual([]);
+  });
+
   it('상대 기기에서 본 같은 행은 별점 투영이 상대 값으로 바뀐다', () => {
     const row = visitRow({
       visit_entries: [

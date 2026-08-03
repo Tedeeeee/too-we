@@ -65,7 +65,11 @@ export function mapVisit(row, userId) {
   const rawEntries = Array.isArray(row.visit_entries) ? row.visit_entries : [];
   const myEntry = rawEntries.find((entry) => entry.author_id === userId);
   const entries = rawEntries
-    .filter((entry) => normalizeEntryText(entry.note))
+    .filter((entry) => {
+      const text = normalizeEntryText(entry.note);
+      if (entry.author_id === userId) return Boolean(text);
+      return Boolean(text) || normalizeRating(entry.rating) !== null;
+    })
     .map((entry) => {
       const mine = entry.author_id === userId;
       return {

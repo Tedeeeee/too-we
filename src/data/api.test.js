@@ -40,6 +40,60 @@ afterEach(() => {
 });
 
 describe('data API facade', () => {
+  it('첫 화면의 동시 조회가 익명 로그인을 한 번만 수행하고 같은 사용자 id를 쓴다', async () => {
+    let signInCount = 0;
+    const client = createFakeSupabaseClient({
+      session: null,
+      signInResult: () => ({
+        data: { session: { user: { id: `anon-${++signInCount}` } } },
+        error: null,
+      }),
+      tables: {
+        couples: [],
+        visits: [
+          visitRow({
+            visit_entries: [{ author_id: 'anon-1', note: null, rating: 4 }],
+          }),
+        ],
+      },
+    });
+    __setSupabaseClient(client);
+
+    const [couple, records] = await Promise.all([api.getCouple(), api.getRecords()]);
+
+    expect(signInCount).toBe(1);
+    expect(client.calls.auth.filter((call) => call === 'signInAnonymously')).toHaveLength(1);
+    expect(couple.me.userId).toBe('anon-1');
+    expect(records[0].rating).toBe(4);
+  });
+
+  it('Supabase 테스트 클라이언트를 바꾸면 이전 사용자 id를 재사용하지 않는다', async () => {
+    const firstClient = createFakeSupabaseClient({
+      userId: 'user-a',
+      tables: {
+        visits: [visitRow({ visit_entries: [{ author_id: 'user-a', note: null, rating: 2 }] })],
+      },
+    });
+    __setSupabaseClient(firstClient);
+    await expect(api.getRecords()).resolves.toEqual([
+      expect.objectContaining({ rating: 2 }),
+    ]);
+
+    __resetSupabaseClient();
+    const secondClient = createFakeSupabaseClient({
+      userId: 'user-b',
+      tables: {
+        visits: [visitRow({ visit_entries: [{ author_id: 'user-b', note: null, rating: 5 }] })],
+      },
+    });
+    __setSupabaseClient(secondClient);
+
+    await expect(api.getRecords()).resolves.toEqual([
+      expect.objectContaining({ rating: 5 }),
+    ]);
+    expect(secondClient.calls.auth).toEqual(['getSession']);
+  });
+
   it('기존 Promise API가 주입된 Supabase 저장소의 빈 기록 목록을 그대로 돌려준다', async () => {
     const client = createFakeSupabaseClient({ userId: ME, tables: { visits: [] } });
     __setSupabaseClient(client);

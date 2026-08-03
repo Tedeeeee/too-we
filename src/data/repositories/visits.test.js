@@ -95,6 +95,28 @@ describe('getRecords', () => {
     expect(record.entries.map((entry) => entry.memberId)).toEqual(['me', 'partner']);
   });
 
+  it('저장소 조회에서도 상대 rating-only는 보이고 내 rating-only는 대기 상태로 남는다', async () => {
+    const { visits } = build({
+      tables: {
+        visits: [
+          visitRow({
+            visit_entries: [
+              { author_id: ME, note: null, rating: 3 },
+              { author_id: PARTNER, note: null, rating: 5 },
+            ],
+          }),
+        ],
+      },
+    });
+
+    const [record] = await visits.getRecords();
+
+    expect(record.rating).toBe(3);
+    expect(record.entries).toEqual([
+      expect.objectContaining({ memberId: 'partner', text: null, rating: 5, readOnly: true }),
+    ]);
+  });
+
   it('커플 id를 클라이언트가 넘기지 않는다 — RLS가 범위를 정한다', async () => {
     const { client, visits } = build({ tables: { visits: [] } });
 
