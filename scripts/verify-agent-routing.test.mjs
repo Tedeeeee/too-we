@@ -152,6 +152,13 @@ describe('Codex implementation changes without a grant', () => {
     expect(output.join('\n')).toContain('ORCA_TERMINAL_HANDLE');
   });
 
+  it('names the required --run flag in its grant guidance', () => {
+    // 안내문에 --run이 빠지면 코디네이터가 그대로 복사해 실행했을 때 create가 실패한다.
+    stage('src/data/api.js');
+    expect(verify(['--staged'])).toBe(1);
+    expect(output.join('\n')).toContain('--run <run>');
+  });
+
   it('never prints environment values or stored evidence', () => {
     stage('src/data/api.js');
     putGrant({ expiresAt: '2026-08-03T11:00:00.000Z' });

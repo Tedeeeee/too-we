@@ -1,7 +1,12 @@
 /**
  * 라우팅 훅을 모든 로컬 worktree에 설치한다.
  *
- *   node scripts/agent-routing-install-hooks.mjs [--hooks-dir <repo-relative-dir>]
+ *   node scripts/agent-routing-install-hooks.mjs
+ *
+ * 인자를 받지 않는다. 템플릿은 항상 정확히 주 worktree의 `.githooks/pre-commit`과
+ * `.githooks/post-commit`이며, 둘 다 Git이 추적하는 일반 파일이고 HEAD 기준으로 staged·
+ * unstaged 변경이 없어야 배포된다. 경로를 바꾸는 플래그나 디렉터리 훑기를 허용하면
+ * 저장소 안에 커밋해 둔 임의 스크립트를 훅으로 배포할 수 있다.
  *
  * 버전 관리되는 `.githooks/` 템플릿을 공유 Git common 디렉터리 아래
  * `orca-routing-hooks/`로 복사하고, 공유 저장소의 `core.hooksPath`를 그 **절대** 경로로
@@ -25,7 +30,16 @@ import { resolveCommonDir, resolvePrimaryWorktree } from './agent-routing-grant.
 
 const TEMPLATE_DIRNAME = '.githooks';
 const DEPLOY_DIRNAME = 'orca-routing-hooks';
-const USAGE = 'usage: node scripts/agent-routing-install-hooks.mjs [--hooks-dir <dir>]';
+const USAGE = 'usage: node scripts/agent-routing-install-hooks.mjs';
+
+/**
+ * 배포하는 훅은 정확히 이 둘이다.
+ *
+ * 디렉터리를 훑어 "있는 것을 전부" 배포하지 않는다. 템플릿 경로를 바꾸는 플래그도 두지
+ * 않는다 — 둘 중 하나라도 열려 있으면 저장소 안에 커밋해 둔 임의 스크립트를 훅으로
+ * 배포할 수 있다.
+ */
+const REQUIRED_HOOKS = Object.freeze(['pre-commit', 'post-commit']);
 
 function gitOut(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -57,6 +71,64 @@ function sameFile(a, b) {
   }
 }
 
+function gitLines(cwd, args) {
+  return gitOut(cwd, args).split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '');
+}
+
+/**
+ * 템플릿이 "커밋된 깨끗한 baseline"인지 확인한다.
+ *
+ * 배포 대상은 리뷰를 통과해 커밋된 내용이어야 한다. 파일이 없거나, 일반 파일이 아니거나,
+ * Git이 추적하지 않거나, HEAD 기준으로 staged·unstaged 변경이 남아 있으면 배포하지 않는다
+ * (fail closed). 이 검사가 없으면 커밋하지 않은 훅을 배포해 가드를 조용히 바꿀 수 있다.
+ *
+ * Git 상태는 반드시 주 worktree에서 조회한다 — 자식 worktree의 index·HEAD를 보면 안 된다.
+ *
+ * @returns {string[]} 문제 설명 목록. 비어 있으면 배포해도 된다.
+ */
+function validateTemplates({ primary, templateDir }) {
+  const problems = [];
+  for (const hook of REQUIRED_HOOKS) {
+    const relative = `${TEMPLATE_DIRNAME}/${hook}`;
+    let stat;
+    try {
+      stat = fs.lstatSync(path.join(templateDir, hook));
+    } catch {
+      problems.push(`${relative} 템플릿이 없다`);
+      continue;
+    }
+    // lstat이므로 심볼릭 링크는 일반 파일로 인정되지 않는다.
+    if (!stat.isFile()) {
+      problems.push(`${relative} 템플릿이 일반 파일이 아니다`);
+      continue;
+    }
+
+    let tracked;
+    let staged;
+    let unstaged;
+    try {
+      tracked = gitLines(primary, ['ls-files', '--', relative]).length > 0;
+      staged = gitLines(primary, ['diff', '--cached', '--name-only', 'HEAD', '--', relative]).length > 0;
+      unstaged = gitLines(primary, ['diff', '--name-only', '--', relative]).length > 0;
+    } catch {
+      problems.push(`${relative} 템플릿의 Git 상태를 확인할 수 없다`);
+      continue;
+    }
+    if (!tracked) {
+      problems.push(`${relative} 템플릿이 Git에 추적되지 않는다 — 커밋된 baseline만 배포한다`);
+      continue;
+    }
+    if (staged) {
+      problems.push(`${relative} 템플릿에 커밋되지 않은 staged 변경이 있다`);
+      continue;
+    }
+    if (unstaged) {
+      problems.push(`${relative} 템플릿에 커밋되지 않은 unstaged 변경이 있다`);
+    }
+  }
+  return problems;
+}
+
 /** 임시 파일에 쓰고 rename — 반쯤 복사된 훅이 실행되는 창을 없앤다. */
 function copyAtomic(source, target) {
   const temp = `${target}.tmp-${process.pid}`;
@@ -76,19 +148,12 @@ function copyAtomic(source, target) {
 export function runInstall(options = {}) {
   const { argv = [], cwd = process.cwd(), log = console.log, error = console.error } = options;
 
-  let requestedDir = null;
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] !== '--hooks-dir') {
-      error(`허용되지 않은 플래그: ${argv[i]}`);
-      error(USAGE);
-      return 1;
-    }
-    requestedDir = argv[i + 1];
-    i += 1;
-    if (!requestedDir) {
-      error('--hooks-dir 값이 없다');
-      return 1;
-    }
+  // 인자를 하나도 받지 않는다. 템플릿 경로는 항상 정확히 primary/.githooks다.
+  if (argv.length > 0) {
+    error(`[agent-routing] 이 명령은 인자를 받지 않는다: ${argv[0]}`);
+    error('[agent-routing] 훅 템플릿은 항상 주 worktree의 .githooks/ 이며 바꿀 수 없다.');
+    error(USAGE);
+    return 1;
   }
 
   let primary;
@@ -101,7 +166,7 @@ export function runInstall(options = {}) {
     return 0;
   }
 
-  const templateDir = path.resolve(primary, requestedDir ?? TEMPLATE_DIRNAME);
+  const templateDir = path.join(primary, TEMPLATE_DIRNAME);
   let resolvedTemplate;
   try {
     resolvedTemplate = fs.realpathSync(templateDir);
@@ -114,34 +179,35 @@ export function runInstall(options = {}) {
     return 1;
   }
 
-  // 저장소 안에 있는 템플릿만 배포한다.
-  const relative = path.relative(primary, resolvedTemplate);
-  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
-    error(`[agent-routing] 훅 템플릿이 저장소(${primary}) 안에 없다: ${resolvedTemplate}`);
+  // `.githooks`가 저장소 밖을 가리키는 심볼릭 링크로 바뀐 경우를 막는다.
+  const insideRepo = path.relative(primary, resolvedTemplate);
+  if (insideRepo !== TEMPLATE_DIRNAME) {
+    error(`[agent-routing] 훅 템플릿이 주 worktree의 ${TEMPLATE_DIRNAME}/ 가 아니다: ${resolvedTemplate}`);
     return 1;
   }
 
-  const templates = fs.readdirSync(resolvedTemplate, { withFileTypes: true })
-    .filter((entry) => entry.isFile())
-    .map((entry) => entry.name);
-  if (templates.length === 0) {
-    error(`[agent-routing] 배포할 훅이 없다: ${resolvedTemplate}`);
+  // 검사를 모두 통과하기 전에는 아무것도 배포하지 않는다.
+  const problems = validateTemplates({ primary, templateDir: resolvedTemplate });
+  if (problems.length > 0) {
+    error('[agent-routing] 훅 템플릿이 커밋된 깨끗한 baseline이 아니라 설치하지 않는다.');
+    for (const problem of problems) error(`  - ${problem}`);
+    error('[agent-routing] 템플릿을 되돌리거나 커밋한 뒤 다시 설치한다.');
     return 1;
   }
 
   let changed = false;
   try {
     fs.mkdirSync(deployDir, { recursive: true, mode: 0o700 });
-    for (const name of templates) {
+    for (const name of REQUIRED_HOOKS) {
       const source = path.join(resolvedTemplate, name);
       const target = path.join(deployDir, name);
       if (sameFile(source, target)) continue;
       copyAtomic(source, target);
       changed = true;
     }
-    // 템플릿에서 사라진 훅은 배포본에서도 없앤다 — 유령 훅이 남아 도는 것을 막는다.
+    // 배포 대상이 아닌 파일은 없앤다 — 유령 훅이 남아 도는 것을 막는다.
     for (const entry of fs.readdirSync(deployDir, { withFileTypes: true })) {
-      if (!entry.isFile() || templates.includes(entry.name)) continue;
+      if (!entry.isFile() || REQUIRED_HOOKS.includes(entry.name)) continue;
       fs.rmSync(path.join(deployDir, entry.name), { force: true });
       changed = true;
     }
@@ -165,7 +231,7 @@ export function runInstall(options = {}) {
     log(`[agent-routing] 훅이 이미 설치돼 있다: ${target}`);
     return 0;
   }
-  log(`[agent-routing] 훅 배포: ${templates.join(', ')} → ${target}`);
+  log(`[agent-routing] 훅 배포: ${REQUIRED_HOOKS.join(', ')} → ${target}`);
   log('[agent-routing] 모든 worktree가 같은 훅을 쓴다 (작업 트리 밖이라 커밋으로 지울 수 없다).');
   return 0;
 }

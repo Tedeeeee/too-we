@@ -73,7 +73,7 @@ function report({ error, blockedPaths, reasons, missingFields }) {
   if (missingFields.length > 0) error(`  확인이 필요한 항목: ${missingFields.join(', ')}`);
   error('  구현 작업은 Claude가 이어받는다 (AGENTS.md / docs/agent-workflow.md).');
   error('  Claude 계정 사용량 소진이 증명된 경우에만 코디네이터가 grant를 만든다:');
-  error('    node scripts/agent-routing-grant.mjs create --terminal <term> --task <task> \\');
+  error('    node scripts/agent-routing-grant.mjs create --terminal <term> --task <task> --run <run> \\');
   error('      --evidence-source <enum> --observed-at <iso> --expires-at <iso> \\');
   error('      --allowed-path <path> --remaining-scope <text>');
   error('    node scripts/agent-routing-grant.mjs finalize --terminal <term> --dispatch <ctx>');

@@ -430,6 +430,18 @@ describe('grant status', () => {
 });
 
 describe('grant CLI surface', () => {
+  it('names the required --run flag in the printed usage', () => {
+    expect(invoke(['destroy'])).toBe(1);
+    expect(output.join('\n')).toContain('--run <run>');
+  });
+
+  it('names the required --run flag in the file header usage block', () => {
+    const source = fs.readFileSync(new URL('./agent-routing-grant.mjs', import.meta.url), 'utf8');
+    const header = source.slice(0, source.indexOf('*/'));
+    expect(header).toContain('create');
+    expect(header).toContain('--run <run>');
+  });
+
   it('rejects unknown subcommands and prints usage', () => {
     expect(invoke(['destroy', '--terminal', TERMINAL])).toBe(1);
     expect(invoke([])).toBe(1);

@@ -1,7 +1,7 @@
 /**
  * Codex fallback grant 수명주기 CLI — 코디네이터 전용.
  *
- *   node scripts/agent-routing-grant.mjs create   --terminal <term> --task <task> \
+ *   node scripts/agent-routing-grant.mjs create   --terminal <term> --task <task> --run <run> \
  *                                                 --evidence-source <enum> --observed-at <iso> \
  *                                                 --expires-at <iso> --allowed-path <path> \
  *                                                 --remaining-scope <text>
@@ -59,9 +59,27 @@ const COMMANDS = {
 
 const REPEATABLE = new Set(['--allowed-path']);
 
+/** usage 출력에 쓰는 플래그별 placeholder — 그대로 복사해 채울 수 있게 이름을 보여준다. */
+const FLAG_PLACEHOLDERS = {
+  '--terminal': '<term>',
+  '--task': '<task>',
+  '--run': '<run>',
+  '--dispatch': '<ctx>',
+  '--evidence-source': '<enum>',
+  '--observed-at': '<iso>',
+  '--expires-at': '<iso>',
+  '--allowed-path': '<path>',
+  '--remaining-scope': '<text>',
+  '--tree': '<tree>',
+  '--commit': '<sha>',
+};
+
 const USAGE = [
   'usage: node scripts/agent-routing-grant.mjs <command> [flags]',
-  ...Object.entries(COMMANDS).map(([name, flags]) => `  ${name} ${flags.map((flag) => `${flag} <value>`).join(' ')}`),
+  ...Object.entries(COMMANDS).map(([name, flags]) => {
+    const rendered = flags.map((flag) => `${flag} ${FLAG_PLACEHOLDERS[flag] ?? '<value>'}`).join(' ');
+    return `  ${name} ${rendered}`;
+  }),
 ].join('\n');
 
 function gitOut(cwd, args) {

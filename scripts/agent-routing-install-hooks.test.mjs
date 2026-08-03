@@ -74,6 +74,133 @@ function expectedHooksPath() {
   return posix(path.join(workspace.primary, '.git', 'orca-routing-hooks'));
 }
 
+function deployedDir() {
+  return path.join(workspace.primary, '.git', 'orca-routing-hooks');
+}
+
+function templatePath(hook) {
+  return path.join(workspace.primary, '.githooks', hook);
+}
+
+/** 설치가 아무것도 하지 않았는지 — 배포 디렉터리도 hooksPath도 건드리지 않았다. */
+function expectNotInstalled() {
+  expect(fs.existsSync(deployedDir())).toBe(false);
+  expect(tryGit(workspace.primary, ['config', '--get', 'core.hooksPath']).stdout)
+    .not.toContain('orca-routing-hooks');
+}
+
+describe('installer argv surface', () => {
+  beforeEach(() => {
+    installGuardFiles(workspace.primary);
+  });
+
+  /**
+   * 프로덕션 CLI에는 템플릿 경로를 바꾸는 플래그가 없다. 있으면 저장소 안의 임의
+   * 디렉터리(예: 공격자가 커밋한 `tools/fake-hooks`)를 훅으로 배포할 수 있다.
+   * 템플릿은 항상 정확히 `primary/.githooks`다.
+   */
+  it('rejects --hooks-dir and every other argument', () => {
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'outside-hooks-')));
+    try {
+      const rejected = [
+        ['--hooks-dir', outside],
+        ['--hooks-dir', '.githooks'],
+        ['--hooks-dir', 'tools/fake-hooks'],
+        ['--hooks-dir', '../evil'],
+        ['--hooks-dir'],
+        ['--template-dir', '.githooks'],
+        ['--force'],
+        ['.githooks'],
+      ];
+      for (const argv of rejected) {
+        output.length = 0;
+        expect(install({ argv }), JSON.stringify(argv)).toBe(1);
+        expectNotInstalled();
+      }
+    } finally {
+      cleanup(outside);
+    }
+  });
+
+  it('cannot be redirected to a repository-internal directory', () => {
+    // 저장소 안에 진짜처럼 보이는 훅 세트를 커밋해 둬도 배포되지 않는다.
+    writeFile(workspace.primary, 'tools/fake-hooks/pre-commit', '#!/bin/sh\nexit 0\n');
+    writeFile(workspace.primary, 'tools/fake-hooks/post-commit', '#!/bin/sh\nexit 0\n');
+    git(workspace.primary, ['add', '--', 'tools/fake-hooks']);
+    git(workspace.primary, ['commit', '-q', '-m', 'chore: decoy hooks', '--no-verify']);
+
+    expect(install({ argv: ['--hooks-dir', 'tools/fake-hooks'] })).toBe(1);
+    expectNotInstalled();
+
+    // 플래그 없이 설치하면 진짜 템플릿만 배포된다.
+    expect(install()).toBe(0);
+    expect(fs.readFileSync(path.join(deployedDir(), 'pre-commit'), 'utf8'))
+      .toBe(fs.readFileSync(templatePath('pre-commit'), 'utf8'));
+  });
+});
+
+describe('template integrity', () => {
+  beforeEach(() => {
+    installGuardFiles(workspace.primary);
+  });
+
+  it('refuses a missing template', () => {
+    fs.rmSync(templatePath('post-commit'));
+    expect(install()).toBe(1);
+    expect(output.join('\n')).toContain('post-commit');
+    expectNotInstalled();
+  });
+
+  it('refuses a template that is not a regular file', () => {
+    fs.rmSync(templatePath('pre-commit'));
+    fs.mkdirSync(templatePath('pre-commit'));
+    expect(install()).toBe(1);
+    expectNotInstalled();
+  });
+
+  it('refuses an untracked template', () => {
+    // 파일은 있지만 Git이 모르는 상태 — 커밋된 baseline이 아니므로 배포하지 않는다.
+    git(workspace.primary, ['rm', '-q', '--cached', '--', '.githooks/pre-commit']);
+    expect(install()).toBe(1);
+    expect(output.join('\n')).toContain('.githooks/pre-commit');
+    expectNotInstalled();
+  });
+
+  it('refuses a staged-dirty template', () => {
+    writeFile(workspace.primary, '.githooks/pre-commit', '#!/bin/sh\nexit 0\n');
+    git(workspace.primary, ['add', '--', '.githooks/pre-commit']);
+    expect(install()).toBe(1);
+    expect(output.join('\n')).toContain('.githooks/pre-commit');
+    expectNotInstalled();
+  });
+
+  it('refuses an unstaged-dirty template', () => {
+    writeFile(workspace.primary, '.githooks/post-commit', '#!/bin/sh\nexit 0\n');
+    expect(install()).toBe(1);
+    expect(output.join('\n')).toContain('.githooks/post-commit');
+    expectNotInstalled();
+  });
+
+  it('checks the primary templates even when invoked from a linked worktree', () => {
+    const linked = addWorktree(workspace, 'child', 'claude/feature');
+    writeFile(workspace.primary, '.githooks/pre-commit', '#!/bin/sh\nexit 0\n');
+    expect(install({ cwd: linked })).toBe(1);
+    expectNotInstalled();
+  });
+
+  it('installs from a clean merged baseline and stays idempotent', () => {
+    expect(install()).toBe(0);
+    for (const hook of ['pre-commit', 'post-commit']) {
+      expect(fs.readFileSync(path.join(deployedDir(), hook), 'utf8'))
+        .toBe(fs.readFileSync(templatePath(hook), 'utf8'));
+    }
+    output.length = 0;
+    expect(install()).toBe(0);
+    expect(output.join('\n')).toMatch(/이미|already/i);
+    expect(configuredHooksPath(workspace.primary)).toBe(expectedHooksPath());
+  });
+});
+
 describe('hook installation', () => {
   beforeEach(() => {
     installGuardFiles(workspace.primary);
@@ -92,13 +219,25 @@ describe('hook installation', () => {
     }
   });
 
-  it('refreshes the deployed copy when the versioned template changes', () => {
+  it('refreshes the deployed copy when a committed template changes', () => {
     expect(install()).toBe(0);
+    // 커밋된 baseline만 배포된다 — 템플릿을 고쳤으면 커밋해야 반영된다.
     writeFile(workspace.primary, '.githooks/pre-commit', '#!/bin/sh\nexit 0\n');
+    git(workspace.primary, ['add', '--', '.githooks/pre-commit']);
+    git(workspace.primary, ['commit', '-q', '-m', 'chore: tweak hook', '--no-verify']);
+
     output.length = 0;
     expect(install()).toBe(0);
-    expect(fs.readFileSync(path.join(workspace.primary, '.git', 'orca-routing-hooks', 'pre-commit'), 'utf8'))
-      .toBe('#!/bin/sh\nexit 0\n');
+    expect(fs.readFileSync(path.join(deployedDir(), 'pre-commit'), 'utf8')).toBe('#!/bin/sh\nexit 0\n');
+  });
+
+  it('deploys exactly pre-commit and post-commit, ignoring other template files', () => {
+    writeFile(workspace.primary, '.githooks/extra.sh', '#!/bin/sh\necho extra\n');
+    git(workspace.primary, ['add', '--', '.githooks/extra.sh']);
+    git(workspace.primary, ['commit', '-q', '-m', 'chore: extra script', '--no-verify']);
+
+    expect(install()).toBe(0);
+    expect(fs.readdirSync(deployedDir()).sort()).toEqual(['post-commit', 'pre-commit']);
   });
 
   it('resolves the primary worktree even when invoked from a child worktree', () => {
@@ -121,21 +260,6 @@ describe('hook installation', () => {
     expect(install()).toBe(0);
     expect(output.join('\n')).toMatch(/이미|already/i);
     expect(configuredHooksPath(workspace.primary)).toBe(expectedHooksPath());
-  });
-
-  it('refuses a hook directory outside the repository', () => {
-    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'outside-hooks-')));
-    try {
-      expect(install({ argv: ['--hooks-dir', outside] })).toBe(1);
-      expect(tryGit(workspace.primary, ['config', '--get', 'core.hooksPath']).stdout.trim())
-        .not.toContain('outside-hooks-');
-    } finally {
-      cleanup(outside);
-    }
-  });
-
-  it('refuses a hook directory that does not exist', () => {
-    expect(install({ argv: ['--hooks-dir', path.join(workspace.primary, 'nope') ] })).toBe(1);
   });
 
   it('no-ops with a clear message outside a Git repository', () => {
