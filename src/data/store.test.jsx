@@ -400,14 +400,33 @@ describe('AppProvider actions', () => {
   it('가고 싶은 곳 생성을 동시에 두 번 제출해도 한 번만 쓰고 최신 서버 목록을 다시 읽는다', async () => {
     await renderReadyProvider();
     const pending = deferred();
-    const input = Object.freeze({
+    const supportedSnapshot = {
       provider: 'kakao',
       providerId: 'kakao-w2',
       name: '  뚝섬 한강공원  ',
       category: '공원',
+    };
+    const firstInput = Object.freeze({
+      ...supportedSnapshot,
+      phone: '02-1111-1111',
+      requestKey: 'caller-intent-1',
+      coupleId: 'caller-couple-1',
+      createdBy: 'caller-user-1',
     });
-    const original = structuredClone(input);
-    const created = { id: 'wishlist-2', ...input, name: '뚝섬 한강공원', pickedBy: '지은' };
+    const secondInput = Object.freeze({
+      ...supportedSnapshot,
+      phone: '02-2222-2222',
+      requestKey: 'caller-intent-2',
+      coupleId: 'caller-couple-2',
+      createdBy: 'caller-user-2',
+    });
+    const originals = [structuredClone(firstInput), structuredClone(secondInput)];
+    const created = {
+      id: 'wishlist-2',
+      ...supportedSnapshot,
+      name: '뚝섬 한강공원',
+      pickedBy: '지은',
+    };
     const latest = [...RESTORED_WISHLIST, created];
     api.createWishlistPlace.mockReturnValue(pending.promise);
     api.getWishlist.mockResolvedValue(latest);
@@ -415,18 +434,67 @@ describe('AppProvider actions', () => {
     let first;
     let second;
     await act(async () => {
-      first = appState.createWishlistPlace(input);
-      second = appState.createWishlistPlace(input);
+      first = appState.createWishlistPlace(firstInput);
+      second = appState.createWishlistPlace(secondInput);
       pending.resolve(created);
       await Promise.all([first, second]);
     });
 
     expect(api.createWishlistPlace).toHaveBeenCalledTimes(1);
-    expect(api.createWishlistPlace.mock.calls[0][0]).toBe(input);
+    expect(api.createWishlistPlace.mock.calls[0][0]).toBe(firstInput);
     expect(api.getWishlist).toHaveBeenCalledTimes(2);
     expect(appState.wishlist).toEqual(latest);
     expect(appState.wishlistStatus).toBe('ready');
-    expect(input).toEqual(original);
+    expect(firstInput).toEqual(originals[0]);
+    expect(secondInput).toEqual(originals[1]);
+  });
+
+  it('서로 다른 장소 스냅샷은 동시에 각각 생성한다', async () => {
+    await renderReadyProvider();
+    const firstPending = deferred();
+    const secondPending = deferred();
+    const firstInput = Object.freeze({
+      provider: 'kakao',
+      providerId: 'kakao-w2',
+      name: '뚝섬 한강공원',
+      category: '공원',
+    });
+    const secondInput = Object.freeze({
+      provider: 'kakao',
+      providerId: 'kakao-w3',
+      name: '서울대공원',
+      category: '공원',
+    });
+    const originals = [structuredClone(firstInput), structuredClone(secondInput)];
+    const firstCreated = { id: 'wishlist-2', ...firstInput, pickedBy: '지은' };
+    const secondCreated = { id: 'wishlist-3', ...secondInput, pickedBy: '지은' };
+    const latest = [...RESTORED_WISHLIST, firstCreated, secondCreated];
+    api.createWishlistPlace
+      .mockReturnValueOnce(firstPending.promise)
+      .mockReturnValueOnce(secondPending.promise);
+    api.getWishlist.mockResolvedValue(latest);
+
+    let first;
+    let second;
+    act(() => {
+      first = appState.createWishlistPlace(firstInput);
+      second = appState.createWishlistPlace(secondInput);
+    });
+
+    expect(api.createWishlistPlace).toHaveBeenCalledTimes(2);
+    expect(api.createWishlistPlace).toHaveBeenNthCalledWith(1, firstInput);
+    expect(api.createWishlistPlace).toHaveBeenNthCalledWith(2, secondInput);
+
+    await act(async () => {
+      firstPending.resolve(firstCreated);
+      secondPending.resolve(secondCreated);
+      await Promise.all([first, second]);
+    });
+
+    expect(api.getWishlist).toHaveBeenCalledTimes(3);
+    expect(appState.wishlist).toEqual(latest);
+    expect(firstInput).toEqual(originals[0]);
+    expect(secondInput).toEqual(originals[1]);
   });
 
   it('가고 싶은 곳 수정·삭제는 입력을 보존하고 각각 성공한 뒤 서버 진실을 새로 읽는다', async () => {
@@ -581,6 +649,59 @@ describe('AppProvider actions', () => {
     expect(appState.couple).toBeNull();
     expect(appState.records).toEqual([]);
     expect(appState.wishlist).toEqual([]);
+  });
+
+  it('연결 해제로 이전 이름 저장 의도를 격리하고 새 epoch의 이름만 반영한다', async () => {
+    await renderReadyProvider();
+    const oldPendingName = deferred();
+    const newPendingName = deferred();
+    const oldCouple = {
+      ...RESTORED_COUPLE,
+      me: { ...RESTORED_COUPLE.me, name: '이전 커플 이름' },
+    };
+    const newOnboardingCouple = {
+      ...NO_COUPLE,
+      coupleId: 'couple-2',
+      me: { ...NO_COUPLE.me, name: '' },
+    };
+    const renamedNewCouple = {
+      ...newOnboardingCouple,
+      me: { ...newOnboardingCouple.me, name: '새 커플 이름' },
+    };
+    api.setMyName
+      .mockReturnValueOnce(oldPendingName.promise)
+      .mockReturnValueOnce(newPendingName.promise);
+    api.disconnectCouple.mockResolvedValue({ disconnected: true, coupleId: 'couple-1' });
+    api.createCouple.mockResolvedValue(newOnboardingCouple);
+
+    let oldOperation;
+    let newOperation;
+    await act(async () => {
+      oldOperation = appState.setMyName('이전 커플 이름');
+      await appState.disconnectCouple({ requestKey: 'disconnect-intent-1' });
+      await appState.startNewCouple({ requestKey: 'new-couple-intent-1' });
+      newOperation = appState.setMyName('새 커플 이름');
+    });
+
+    expect(api.setMyName).toHaveBeenCalledTimes(2);
+    expect(api.setMyName).toHaveBeenNthCalledWith(1, '이전 커플 이름');
+    expect(api.setMyName).toHaveBeenNthCalledWith(2, '새 커플 이름');
+
+    await act(async () => {
+      oldPendingName.resolve(oldCouple);
+      await oldOperation;
+    });
+    expect(appState.couple).toEqual(newOnboardingCouple);
+
+    const duplicateNewOperation = appState.setMyName('새 커플 이름');
+    expect(duplicateNewOperation).toBe(newOperation);
+    expect(api.setMyName).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      newPendingName.resolve(renamedNewCouple);
+      await Promise.all([newOperation, duplicateNewOperation]);
+    });
+    expect(appState.couple).toEqual(renamedNewCouple);
   });
 
   it('여러 사진 중 성공과 실패를 함께 보존하고 재시도 때 실패한 파일만 보낸다', async () => {

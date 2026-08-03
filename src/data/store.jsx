@@ -21,6 +21,35 @@ const newRequestKey = () => {
   return `request-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 };
 
+const cleanWishlistIntentText = (value) =>
+  typeof value === 'string' ? (value.trim() || null) : null;
+
+const cleanWishlistIntentCoordinate = (value) =>
+  typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+const wishlistCreateIntentKey = (input) => {
+  const place = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const providerIdValue = Object.hasOwn(place, 'providerId')
+    ? place.providerId
+    : Object.hasOwn(place, 'provider_id')
+      ? place.provider_id
+      : place.id;
+  const providerId = cleanWishlistIntentText(providerIdValue);
+  const provider = cleanWishlistIntentText(place.provider) || (providerId ? 'kakao' : 'manual');
+  const snapshot = [
+    provider,
+    providerId,
+    cleanWishlistIntentText(place.name),
+    cleanWishlistIntentText(place.category),
+    cleanWishlistIntentText(place.address),
+    cleanWishlistIntentText(place.roadAddress ?? place.road_address),
+    cleanWishlistIntentText(place.url),
+    cleanWishlistIntentCoordinate(place.lat),
+    cleanWishlistIntentCoordinate(place.lng),
+  ];
+  return `create:${JSON.stringify(snapshot)}`;
+};
+
 export function AppProvider({ children }) {
   const [couple, setCouple] = useState(null);
   const [records, setRecords] = useState([]);
@@ -309,6 +338,7 @@ export function AppProvider({ children }) {
           wishlistMutationInFlightRef.current.clear();
           photoUploadInFlightRef.current.clear();
           photoDeleteInFlightRef.current.clear();
+          profileMutationInFlightRef.current = null;
         }
         disconnectRetryOptionsRef.current = null;
         return result;
@@ -366,7 +396,10 @@ export function AppProvider({ children }) {
         return rec;
       },
       createWishlistPlace(input) {
-        return runWishlistMutation('create', () => api.createWishlistPlace(input));
+        return runWishlistMutation(
+          wishlistCreateIntentKey(input),
+          () => api.createWishlistPlace(input),
+        );
       },
       updateWishlistPlace(wishlistId, input) {
         return runWishlistMutation(
