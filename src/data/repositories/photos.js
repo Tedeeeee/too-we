@@ -30,6 +30,15 @@ const validateRecord = (record) => {
 const isFileLike = (value) =>
   value && typeof value === 'object' && typeof value.size === 'number';
 
+const uploadErrorStatus = (error) => {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.originalStatus);
+  return Number.isInteger(status) && status > 0 ? status : null;
+};
+
+const isUploadOutcomeUnknown = (error) =>
+  uploadErrorStatus(error) === null &&
+  toRepositoryError(error).code === ERROR_CODES.network;
+
 const safeId = (value) => {
   const normalized = String(value ?? '')
     .trim()
@@ -63,6 +72,11 @@ export function createPhotosRepository({
       path: previous?.path ?? null,
       prepared: previous?.prepared ?? null,
       uploadAttempted: previous?.uploadAttempted === true,
+      uploadReplayEligible:
+        previous?.status === 'failed' &&
+        previous?.uploadAttempted === true &&
+        previous?.objectUploaded !== true &&
+        previous?.uploadReplayEligible === true,
       objectUploaded: previous?.objectUploaded === true,
       photo: previous?.photo ?? null,
     };
@@ -79,21 +93,38 @@ export function createPhotosRepository({
       state = { ...state, prepared, path };
 
       if (!state.objectUploaded) {
-        const wasPreviouslyAttempted = state.uploadAttempted;
-        state = { ...state, status: 'uploading', uploadAttempted: true };
-        const upload = await getClient()
-          .storage.from(VISIT_PHOTO_BUCKET)
-          .upload(path, prepared.blob, {
-            cacheControl: '3600',
-            contentType: prepared.contentType,
-            upsert: false,
-          });
-        if (upload?.error) {
-          const status = Number(upload.error.status ?? upload.error.statusCode);
-          const isStablePathReplay = wasPreviouslyAttempted && status === 409;
-          if (!isStablePathReplay) throw upload.error;
+        const canReplayConflict = state.uploadReplayEligible;
+        state = {
+          ...state,
+          status: 'uploading',
+          uploadAttempted: true,
+          uploadReplayEligible: false,
+        };
+        let upload;
+        try {
+          upload = await getClient()
+            .storage.from(VISIT_PHOTO_BUCKET)
+            .upload(path, prepared.blob, {
+              cacheControl: '3600',
+              contentType: prepared.contentType,
+              upsert: false,
+            });
+        } catch (error) {
+          state = { ...state, uploadReplayEligible: isUploadOutcomeUnknown(error) };
+          throw error;
         }
-        state = { ...state, objectUploaded: true };
+        if (upload?.error) {
+          const isStablePathReplay =
+            canReplayConflict && uploadErrorStatus(upload.error) === 409;
+          if (!isStablePathReplay) {
+            state = {
+              ...state,
+              uploadReplayEligible: isUploadOutcomeUnknown(upload.error),
+            };
+            throw upload.error;
+          }
+        }
+        state = { ...state, objectUploaded: true, uploadReplayEligible: false };
       }
 
       state = { ...state, status: 'registering' };

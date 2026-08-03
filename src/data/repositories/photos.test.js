@@ -121,7 +121,60 @@ describe('visit photo upload pipeline', () => {
     expect(replayed).toMatchObject({ status: 'succeeded', objectUploaded: true });
   });
 
-  it('새 filename의 첫 업로드 conflict는 성공으로 추측하거나 metadata를 등록하지 않는다', async () => {
+  it('업로드 결과를 알 수 없던 재시도만 같은 path의 conflict를 재생한다', async () => {
+    let uploadAttempts = 0;
+    const source = file('memory.jpg');
+    const input = Object.freeze([source]);
+    const { client, photos } = build({
+      storage: {
+        'visit-photos': {
+          upload: () => {
+            uploadAttempts += 1;
+            return uploadAttempts === 1
+              ? transportFailure(new TypeError('Failed to fetch https://private.invalid?apikey=hidden'))
+              : transportFailure({ statusCode: 409, message: 'object already exists' });
+          },
+        },
+      },
+      rpc: {
+        register_visit_photo: okEnvelope({ photo_id: 'photo-1', ordinal: 1 }),
+      },
+    });
+
+    const [unknown] = await photos.uploadVisitPhotos(RECORD, input);
+    const retryInput = Object.freeze({ ...unknown });
+    const [replayed] = await photos.uploadVisitPhotos(RECORD, [retryInput]);
+
+    expect(input).toEqual([source]);
+    expect(unknown).toMatchObject({
+      status: 'failed',
+      objectUploaded: false,
+      uploadAttempted: true,
+      uploadReplayEligible: true,
+      error: { code: ERROR_CODES.network, retryable: true },
+    });
+    expect(unknown.error.message).not.toContain('private.invalid');
+    expect(client.calls.storage).toHaveLength(2);
+    expect(client.calls.storage[1]).toMatchObject({
+      path: client.calls.storage[0].path,
+      options: { upsert: false },
+    });
+    expect(client.calls.rpc).toHaveLength(1);
+    expect(lastRpcArgs(client, 'register_visit_photo')).toMatchObject({
+      p_storage_path: unknown.path,
+      p_request_key: unknown.requestKey,
+    });
+    expect(replayed).toMatchObject({
+      status: 'succeeded',
+      objectUploaded: true,
+      uploadReplayEligible: false,
+      path: unknown.path,
+      requestKey: unknown.requestKey,
+      photo: { id: 'photo-1' },
+    });
+  });
+
+  it('새 filename의 확정적 conflict는 재시도해도 metadata를 등록하지 않는다', async () => {
     const { client, photos } = build({
       storage: {
         'visit-photos': {
@@ -133,15 +186,29 @@ describe('visit photo upload pipeline', () => {
       },
     });
 
-    const [result] = await photos.uploadVisitPhotos(RECORD, [file('memory.jpg')]);
+    const [failed] = await photos.uploadVisitPhotos(RECORD, [file('memory.jpg')]);
+    const retryInput = Object.freeze({ ...failed });
+    const [retried] = await photos.uploadVisitPhotos(RECORD, [retryInput]);
 
-    expect(result).toMatchObject({
+    expect([failed.status, retried.status]).toEqual(['failed', 'failed']);
+    expect(client.calls.rpc).toEqual([]);
+    expect(failed).toMatchObject({
       status: 'failed',
       objectUploaded: false,
       uploadAttempted: true,
+      uploadReplayEligible: false,
       error: { code: ERROR_CODES.conflict },
     });
-    expect(client.calls.rpc).toEqual([]);
+    expect(retried).toMatchObject({
+      status: 'failed',
+      objectUploaded: false,
+      uploadAttempted: true,
+      uploadReplayEligible: false,
+      path: failed.path,
+      requestKey: failed.requestKey,
+      error: { code: ERROR_CODES.conflict },
+    });
+    expect(client.calls.storage).toHaveLength(2);
   });
 
   it('여러 파일 중 하나가 실패해도 성공 결과를 버리지 않는다', async () => {
