@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppError, ERROR_CODES } from '@/data/errors';
 import { useApp } from '@/data/store';
@@ -88,10 +88,16 @@ function setGeolocation(getCurrentPosition) {
 
 function Destination() {
   destinationLocation = useLocation();
-  return <div>새 기록 화면</div>;
+  const navigate = useNavigate();
+  return (
+    <div>
+      새 기록 화면
+      <button type="button" onClick={() => navigate(-1)}>도착 화면 뒤로</button>
+    </div>
+  );
 }
 
-function renderMap({ intent, recordId, draft, strict = false } = {}) {
+function renderMap({ intent, recordId, draft, wishlistId, strict = false, historyBase = false } = {}) {
   const entry = intent
     ? {
         pathname: '/map',
@@ -99,15 +105,19 @@ function renderMap({ intent, recordId, draft, strict = false } = {}) {
           intent,
           ...(recordId ? { recordId } : {}),
           ...(draft ? { draft } : {}),
+          ...(wishlistId ? { wishlistId } : {}),
         },
       }
     : { pathname: '/map' };
+  const initialEntries = historyBase ? ['/mypage', entry] : [entry];
   const content = (
-    <MemoryRouter initialEntries={[entry]}>
+    <MemoryRouter initialEntries={initialEntries} initialIndex={initialEntries.length - 1}>
       <Routes>
         <Route path="/map" element={<MapSelect />} />
         <Route path="/record" element={<Destination />} />
         <Route path="/place/:recordId/edit" element={<Destination />} />
+        <Route path="/mypage/wishlist" element={<Destination />} />
+        <Route path="/mypage" element={<div>마이페이지 화면</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -334,6 +344,79 @@ describe('MapSelect selection and route intent', () => {
     expect(Object.isFrozen(destinationLocation.state.draft.place)).toBe(true);
     expect(Object.isFrozen(destinationLocation.state.draft.tags)).toBe(true);
     expect(JSON.stringify(destinationLocation.state)).not.toContain('전달하면 안 되는 짝궁 값');
+  });
+
+  it('wishlist-add intent에서 안전한 전체 불변 스냅샷을 가고 싶은 곳으로 돌려준다', async () => {
+    const user = userEvent.setup();
+    const searchPlace = {
+      ...PLACE,
+      couple_id: '전달하면 안 되는 커플 값',
+      created_by: '전달하면 안 되는 작성자 값',
+      partnerText: '전달하면 안 되는 짝궁 값',
+    };
+    api.getNearbyPlaces.mockResolvedValue([searchPlace]);
+    renderMap({ intent: 'wishlist-add', historyBase: true });
+    await submitKeyword(user, '성수 카페');
+
+    await user.click(await screen.findByRole('button', { name: resultName(PLACE) }));
+
+    expect(await screen.findByText('새 기록 화면')).toBeInTheDocument();
+    expect(destinationLocation.pathname).toBe('/mypage/wishlist');
+    expect(destinationLocation.state).toEqual({
+      intent: 'wishlist-add',
+      place: PLACE,
+    });
+    expect(Object.isFrozen(destinationLocation.state)).toBe(true);
+    expect(Object.isFrozen(destinationLocation.state.place)).toBe(true);
+    expect(JSON.stringify(destinationLocation.state)).not.toContain('전달하면 안 되는');
+
+    await user.click(screen.getByRole('button', { name: '도착 화면 뒤로' }));
+    expect(await screen.findByText('마이페이지 화면')).toBeInTheDocument();
+  });
+
+  it('wishlist-edit intent에서는 공유 항목 id와 새 장소 스냅샷만 돌려준다', async () => {
+    const user = userEvent.setup();
+    api.getNearbyPlaces.mockResolvedValue([{ ...PLACE }]);
+    renderMap({ intent: 'wishlist-edit', wishlistId: 'wishlist-partner-1' });
+    await submitKeyword(user, '성수 카페');
+
+    await user.click(await screen.findByRole('button', { name: resultName(PLACE) }));
+
+    expect(await screen.findByText('새 기록 화면')).toBeInTheDocument();
+    expect(destinationLocation.pathname).toBe('/mypage/wishlist');
+    expect(destinationLocation.state).toEqual({
+      intent: 'wishlist-edit',
+      wishlistId: 'wishlist-partner-1',
+      place: PLACE,
+    });
+    expect(Object.isFrozen(destinationLocation.state.place)).toBe(true);
+  });
+
+  it('wishlist-edit intent의 공유 항목 id가 없으면 둘러보기처럼 선택만 하고 쓰기 화면으로 이동하지 않는다', async () => {
+    const user = userEvent.setup();
+    api.getNearbyPlaces.mockResolvedValue([{ ...PLACE }]);
+    renderMap({ intent: 'wishlist-edit' });
+    await submitKeyword(user, '성수 카페');
+
+    const result = await screen.findByRole('button', { name: resultName(PLACE) });
+    await user.click(result);
+
+    expect(result).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByText('새 기록 화면')).not.toBeInTheDocument();
+  });
+
+  it('wishlist intent에서 뒤로 가면 교체된 가고 싶은 곳 화면을 거쳐 이전 화면으로 돌아간다', async () => {
+    const user = userEvent.setup();
+    renderMap({ intent: 'wishlist-add', historyBase: true });
+
+    await user.click(screen.getByRole('button', { name: '뒤로' }));
+
+    expect(await screen.findByText('새 기록 화면')).toBeInTheDocument();
+    expect(destinationLocation.pathname).toBe('/mypage/wishlist');
+    expect(destinationLocation.state).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: '도착 화면 뒤로' }));
+    expect(await screen.findByText('마이페이지 화면')).toBeInTheDocument();
   });
 });
 
