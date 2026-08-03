@@ -43,6 +43,7 @@ const visitRow = (over = {}) => ({
   place_category: '카페',
   place_address: '서울 성동구 연무장길 7',
   place_road_address: null,
+  place_phone: '02-000-0000',
   place_url: null,
   place_lat: 37.5443,
   place_lng: 127.0557,
@@ -214,6 +215,7 @@ describe('mapVisit — 화면 기록 셰이프', () => {
       category: '카페',
       address: '서울 성동구 연무장길 7',
       roadAddress: null,
+      phone: '02-000-0000',
       url: null,
       lat: 37.5443,
       lng: 127.0557,
@@ -288,6 +290,30 @@ describe('mapVisit — 화면 기록 셰이프', () => {
 
     expect(record.entries.find((e) => e.memberId === 'partner').readOnly).toBe(true);
     expect(record.entries.find((e) => e.memberId === 'me').readOnly).toBe(false);
+  });
+
+  it('상대의 공백을 제거한 한 줄·별점을 함께 보여주되 반드시 읽기 전용으로 낸다', () => {
+    const record = mapVisit(
+      visitRow({
+        visit_entries: [
+          { author_id: ME, note: null, rating: 3 },
+          { author_id: PARTNER, note: '  상대 한 줄  ', rating: 5 },
+        ],
+      }),
+      ME,
+    );
+
+    expect(record.pending).toBe(true);
+    expect(record.rating).toBe(3);
+    expect(record.entries).toEqual([
+      {
+        memberId: 'partner',
+        authorUserId: PARTNER,
+        text: '상대 한 줄',
+        rating: 5,
+        readOnly: true,
+      },
+    ]);
   });
 
   it('한 줄이 비면(null) 그 사용자의 entry를 내보내지 않는다 — 대기 상태', () => {

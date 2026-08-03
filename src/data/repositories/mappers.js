@@ -128,6 +128,7 @@ export function mapVisit(row, userId) {
       category: row.place_category ?? null,
       address: row.place_address ?? null,
       roadAddress: row.place_road_address ?? null,
+      phone: row.place_phone ?? null,
       url: row.place_url ?? null,
       lat: row.place_lat ?? null,
       lng: row.place_lng ?? null,

@@ -25,6 +25,7 @@ const visitRow = (over = {}) => ({
   place_category: '카페',
   place_address: '서울 성동구 연무장길 7',
   place_road_address: null,
+  place_phone: null,
   place_url: null,
   place_lat: 37.5443,
   place_lng: 127.0557,
@@ -183,6 +184,41 @@ describe('saveFiveSecondRecord — 기다리는 기록에 내 한 줄 붙이기'
       expect(JSON.stringify(call.args)).not.toContain(PARTNER);
     }
     expect(client.calls.queries.filter((query) => query.op !== 'select')).toEqual([]);
+  });
+
+  it.each([
+    ['entries', { entries: [{ memberId: 'partner', text: '상대 한 줄', rating: 5 }] }],
+    ['authorId', { authorId: PARTNER }],
+    ['memberId', { memberId: 'partner' }],
+  ])('%s로 상대 기록을 쓰려는 입력은 auth·RPC 전에 거부한다', async (_key, malicious) => {
+    const { client, visits } = build({ tables: {}, rpc: {} });
+    const input = Object.freeze({ recordId: 'v1', text: '내 한 줄', ...malicious });
+
+    await expect(visits.saveFiveSecondRecord(input)).rejects.toMatchObject({
+      code: ERROR_CODES.validation,
+      retryable: false,
+    });
+
+    expect(client.calls.auth).toEqual([]);
+    expect(client.calls.rpc).toEqual([]);
+    expect(client.calls.queries).toEqual([]);
+  });
+
+  it.each([
+    ['한 줄 타입', { text: { value: '내 한 줄' }, rating: 3 }],
+    ['1~5 범위 밖 별점', { text: '내 한 줄', rating: 6 }],
+    ['소수 별점', { text: '내 한 줄', rating: 2.5 }],
+  ])('잘못된 %s 입력은 자동 clear하지 않고 쓰기 전에 거부한다', async (_caseName, entry) => {
+    const { client, visits } = build({ tables: {}, rpc: {} });
+    const input = Object.freeze({ recordId: 'v1', ...entry });
+
+    await expect(visits.saveFiveSecondRecord(input)).rejects.toMatchObject({
+      code: ERROR_CODES.validation,
+    });
+
+    expect(client.calls.auth).toEqual([]);
+    expect(client.calls.rpc).toEqual([]);
+    expect(client.calls.queries).toEqual([]);
   });
 
   it('대기 카드를 채우려고 보충 기록을 만들지 않는다', async () => {
@@ -493,6 +529,17 @@ describe('setRecordFlower', () => {
 
     await expect(visits.setRecordFlower('v1', 'nope')).rejects.toMatchObject({ code: ERROR_CODES.conflict });
   });
+
+  it('문자열이 아닌 꽃 값은 쓰기 전에 validation으로 거부한다', async () => {
+    const { client, visits } = build({ tables: {}, rpc: {} });
+
+    await expect(visits.setRecordFlower('v1', 42)).rejects.toMatchObject({
+      code: ERROR_CODES.validation,
+      retryable: false,
+    });
+    expect(client.calls.auth).toEqual([]);
+    expect(client.calls.queries).toEqual([]);
+  });
 });
 
 describe('updateRecord', () => {
@@ -521,6 +568,56 @@ describe('updateRecord', () => {
       p_text: '고친 한 줄',
       p_rating: 4,
     });
+  });
+
+  it('태그는 빈 값을 제거하고 사용자가 넘긴 순서 그대로 저장한다', async () => {
+    const { client, visits } = build({
+      tables: { visits: [EDITED_ROW] },
+      rpc: { set_visit_tags: okEnvelope({ visit_id: 'v1', tag_count: 2 }) },
+    });
+    const patch = Object.freeze({ tags: Object.freeze([' # 첫 ', ' ', '# 둘']) });
+
+    await visits.updateRecord('v1', patch);
+
+    expect(lastRpcArgs(client, 'set_visit_tags')).toEqual({
+      p_visit_id: 'v1',
+      p_labels: ['# 첫', '# 둘'],
+    });
+    expect(patch.tags).toEqual([' # 첫 ', ' ', '# 둘']);
+  });
+
+  it.each([
+    ['text', { text: { value: '내 한 줄' } }],
+    ['undefined text', { text: undefined }],
+    ['rating', { rating: 6 }],
+    ['undefined rating', { rating: undefined }],
+    ['tags', { tags: '# 문자열' }],
+    ['tag item', { tags: ['# 정상', 42] }],
+    ['flower', { flower: 42 }],
+    ['undefined flower', { flower: undefined }],
+    ['date', { date: null }],
+    ['place id', { place: { id: 42, name: '새 장소' } }],
+    ['place coordinate', { place: { name: '새 장소', lat: '37.5' } }],
+  ])('잘못된 %s patch는 기존 값을 clear하거나 일부 저장하기 전에 거부한다', async (_field, invalidPatch) => {
+    const { client, visits } = build({
+      tables: { visits: [EDITED_ROW] },
+      rpc: {
+        set_visit_tags: okEnvelope({ visit_id: 'v1' }),
+        upsert_my_visit_entry: okEnvelope({ visit_id: 'v1' }),
+      },
+    });
+    const patch = Object.freeze(invalidPatch);
+    const original = structuredClone(invalidPatch);
+
+    await expect(visits.updateRecord('v1', patch)).rejects.toMatchObject({
+      code: ERROR_CODES.validation,
+      retryable: false,
+    });
+
+    expect(patch).toEqual(original);
+    expect(client.calls.auth).toEqual([]);
+    expect(client.calls.rpc).toEqual([]);
+    expect(client.calls.queries).toEqual([]);
   });
 
   it('한 줄을 비우면 대기 상태로 돌아간다', async () => {
@@ -577,6 +674,115 @@ describe('updateRecord', () => {
     expect(update.payload).toEqual({ flower_key: 'lilac', visited_at: '2026-05-04T09:00:00.000Z' });
   });
 
+  it('장소는 정규화한 전체 스냅샷과 공동 컬럼을 한 번에 바꾸고 최신 장소를 다시 읽는다', async () => {
+    const latestRow = visitRow({
+      ...EDITED_ROW,
+      place_provider: 'kakao',
+      place_provider_id: 'kakao-2',
+      place_name: '연남동 카페',
+      place_category: '음식점 > 카페',
+      place_address: '서울 마포구 연남동',
+      place_road_address: '서울 마포구 동교로 1',
+      place_phone: '02-000-0000',
+      place_url: 'https://place.map.kakao.com/kakao-2',
+      place_lat: 37.566,
+      place_lng: 126.922,
+    });
+    let selectCount = 0;
+    const { client, visits } = build({
+      tables: {
+        visits: (query) => {
+          if (query.op === 'update') return [{ id: 'v1' }];
+          selectCount += 1;
+          return selectCount === 1 ? [EDITED_ROW] : [latestRow];
+        },
+      },
+    });
+    const patch = Object.freeze({
+      place: Object.freeze({
+        id: ' kakao-2 ',
+        name: '  연남동 카페  ',
+        category: ' 음식점 > 카페 ',
+        address: ' 서울 마포구 연남동 ',
+        roadAddress: ' 서울 마포구 동교로 1 ',
+        phone: ' 02-000-0000 ',
+        url: ' https://place.map.kakao.com/kakao-2 ',
+        lat: 37.566,
+        lng: 126.922,
+        provider: 'kakao',
+      }),
+    });
+    const original = structuredClone(patch);
+
+    const record = await visits.updateRecord('v1', patch);
+
+    const normalizedPlace = {
+      provider: 'kakao',
+      provider_id: 'kakao-2',
+      name: '연남동 카페',
+      category: '음식점 > 카페',
+      address: '서울 마포구 연남동',
+      road_address: '서울 마포구 동교로 1',
+      phone: '02-000-0000',
+      url: 'https://place.map.kakao.com/kakao-2',
+      lat: 37.566,
+      lng: 126.922,
+    };
+    const update = queriesFor(client, 'visits').find((query) => query.op === 'update');
+    expect(update.payload).toEqual({
+      place_provider: 'kakao',
+      place_provider_id: 'kakao-2',
+      place_name: '연남동 카페',
+      place_category: '음식점 > 카페',
+      place_address: '서울 마포구 연남동',
+      place_road_address: '서울 마포구 동교로 1',
+      place_phone: '02-000-0000',
+      place_url: 'https://place.map.kakao.com/kakao-2',
+      place_lat: 37.566,
+      place_lng: 126.922,
+      place_snapshot: normalizedPlace,
+      place_snapshot_at: NOW.toISOString(),
+    });
+    expect(update.filters).toEqual([['eq', 'id', 'v1']]);
+    expect(record.place).toEqual({
+      provider: 'kakao',
+      providerId: 'kakao-2',
+      name: '연남동 카페',
+      category: '음식점 > 카페',
+      address: '서울 마포구 연남동',
+      roadAddress: '서울 마포구 동교로 1',
+      phone: '02-000-0000',
+      url: 'https://place.map.kakao.com/kakao-2',
+      lat: 37.566,
+      lng: 126.922,
+    });
+    expect(patch).toEqual(original);
+    expect(client.calls.rpc).toEqual([]);
+  });
+
+  it('장소 공동 쓰기가 실패하면 입력과 기존 장소를 변경하지 않고 안정적으로 거부한다', async () => {
+    const rawMessage = 'place update failed: secret backend detail';
+    const { client, visits } = build({
+      tables: {
+        visits: (query) => (
+          query.op === 'update'
+            ? transportFailure({ status: 500, message: rawMessage })
+            : [EDITED_ROW]
+        ),
+      },
+    });
+    const patch = Object.freeze({ place: Object.freeze({ name: '  새 장소  ' }) });
+    const original = structuredClone(patch);
+
+    const error = await visits.updateRecord('v1', patch).catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: ERROR_CODES.network, retryable: true });
+    expect(error.message).not.toContain(rawMessage);
+    expect(patch).toEqual(original);
+    expect(queriesFor(client, 'visits')).toHaveLength(2);
+    expect(client.calls.rpc).toEqual([]);
+  });
+
   it('상대 한 줄을 쓰지 않는다', async () => {
     const { client, visits } = build({
       tables: { visits: [EDITED_ROW] },
@@ -617,5 +823,24 @@ describe('updateRecord', () => {
     await expect(visits.updateRecord('v9', { tags: ['x'] })).rejects.toMatchObject({
       code: ERROR_CODES.not_found,
     });
+  });
+
+  it('개인 entry 쓰기가 실패하면 입력을 변경하지 않고 원시 백엔드 문구를 노출하지 않는다', async () => {
+    const rawMessage = 'Failed to fetch https://backend.invalid?apikey=do-not-expose';
+    const { client, visits } = build({
+      tables: { visits: [EDITED_ROW] },
+      rpc: { upsert_my_visit_entry: transportFailure(new TypeError(rawMessage)) },
+    });
+    const patch = Object.freeze({ text: '  변경할 한 줄  ', rating: 5 });
+    const original = structuredClone(patch);
+
+    const error = await visits.updateRecord('v1', patch).catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: ERROR_CODES.network, retryable: true });
+    expect(error.message).not.toContain('backend.invalid');
+    expect(error.message).not.toContain('apikey');
+    expect(patch).toEqual(original);
+    expect(rpcNames(client)).toEqual(['upsert_my_visit_entry']);
+    expect(queriesFor(client, 'visits')).toHaveLength(1);
   });
 });
