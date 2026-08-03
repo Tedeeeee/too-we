@@ -100,7 +100,11 @@ describe('MapView Kakao SDK lifecycle', () => {
 
     await waitFor(() => expect(harness.Map).toHaveBeenCalledTimes(1));
     expect(harness.Map.mock.calls[0][1].center).toMatchObject({ lat: 37.1, lng: 127.1 });
-    expect(harness.markers.filter((marker) => marker.activeMap)).toHaveLength(2);
+    // Markers come from the effect that runs after the ready-state commit, not from the
+    // SDK promise, so this needs its own wait rather than riding on the Map assertion.
+    await waitFor(() =>
+      expect(harness.markers.filter((marker) => marker.activeMap)).toHaveLength(2),
+    );
 
     rerender(
       <MapView

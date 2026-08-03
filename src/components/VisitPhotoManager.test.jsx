@@ -117,6 +117,30 @@ describe('VisitPhotoManager uploads', () => {
     expect(await screen.findByLabelText('a.jpg 업로드 상태')).toHaveTextContent('업로드 완료');
   });
 
+  it('진행 중인 다른 배치의 결과로 재시도한 사진을 성공 처리하지 않는다', async () => {
+    const user = userEvent.setup();
+    const a = file('a.jpg');
+    const b = file('b.jpg');
+    const failedB = failed(b, 'client-b');
+    const pending = deferred();
+    // 스토어는 기록당 업로드를 하나만 돌린다. 이미 진행 중이면 넘긴 입력을 무시하고
+    // 먼저 시작한 배치의 promise를 그대로 돌려준다(store.jsx runPhotoUploads).
+    const addPhotos = vi.fn().mockReturnValue(pending.promise);
+    renderManager({ uploads: [failedB], addPhotos });
+
+    fireEvent.change(screen.getByLabelText('사진 추가'), { target: { files: [a] } });
+    expect(addPhotos).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole('button', { name: 'b.jpg 다시 시도' }));
+    await act(async () => pending.resolve([succeeded(a, 'client-a', 'photo-a')]));
+
+    expect(screen.getByLabelText('a.jpg 업로드 상태')).toHaveTextContent('업로드 완료');
+    const retriedB = screen.getByLabelText('b.jpg 업로드 상태');
+    expect(retriedB).not.toHaveTextContent('업로드 완료');
+    expect(retriedB).toHaveTextContent('네트워크 연결이 불안정해요');
+    expect(screen.getByRole('button', { name: 'b.jpg 다시 시도' })).toBeInTheDocument();
+  });
+
   it('replaces a successful upload status card with refreshed server photo truth', () => {
     const a = file('a.jpg');
     const upload = succeeded(a, 'client-a', 'photo-a');
