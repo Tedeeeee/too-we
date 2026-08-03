@@ -12,7 +12,7 @@ import {
   useState,
 } from 'react';
 import * as api from './api';
-import { toAppError } from './errors';
+import { AppError, ERROR_CODES, toAppError } from './errors';
 
 const AppContext = createContext(null);
 
@@ -21,8 +21,19 @@ export function AppProvider({ children }) {
   const [records, setRecords] = useState([]);
   const [bootstrapStatus, setBootstrapStatus] = useState('loading');
   const [bootstrapError, setBootstrapError] = useState(null);
+  const [photoUploadsByRecord, setPhotoUploadsByRecord] = useState({});
+  const [photoDeletesByRecord, setPhotoDeletesByRecord] = useState({});
   const mountedRef = useRef(false);
   const bootstrapAttemptRef = useRef(0);
+  const recordsRef = useRef(records);
+  const photoUploadsRef = useRef(photoUploadsByRecord);
+  const photoDeletesRef = useRef(photoDeletesByRecord);
+  const photoUploadInFlightRef = useRef(new Map());
+  const photoDeleteInFlightRef = useRef(new Map());
+
+  recordsRef.current = records;
+  photoUploadsRef.current = photoUploadsByRecord;
+  photoDeletesRef.current = photoDeletesByRecord;
 
   const bootstrap = useCallback(async () => {
     const attempt = bootstrapAttemptRef.current + 1;
@@ -38,6 +49,7 @@ export function AppProvider({ children }) {
       if (!mountedRef.current || attempt !== bootstrapAttemptRef.current) return;
 
       setCouple(nextCouple);
+      recordsRef.current = nextRecords;
       setRecords(nextRecords);
       setBootstrapStatus('ready');
     } catch (error) {
@@ -62,8 +74,82 @@ export function AppProvider({ children }) {
 
   const refreshRecords = useCallback(async () => {
     const nextRecords = await api.getRecords();
-    if (mountedRef.current) setRecords(nextRecords);
+    if (mountedRef.current) {
+      recordsRef.current = nextRecords;
+      setRecords(nextRecords);
+    }
   }, []);
+
+  const recordForPhotoAction = useCallback((recordId) => {
+    const record = recordsRef.current.find((item) => item.id === recordId);
+    if (!record) throw new AppError(ERROR_CODES.not_found, { cause: { resource: 'visit' } });
+    return record;
+  }, []);
+
+  const mergePhotoUploads = useCallback((recordId, results) => {
+    setPhotoUploadsByRecord((current) => {
+      const merged = [...(current[recordId] ?? [])];
+      const positionById = new Map(merged.map((item, index) => [item.clientId, index]));
+      for (const result of results) {
+        const position = positionById.get(result.clientId);
+        if (position === undefined) {
+          positionById.set(result.clientId, merged.length);
+          merged.push(result);
+        } else {
+          merged[position] = result;
+        }
+      }
+      const next = { ...current, [recordId]: merged };
+      photoUploadsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const runPhotoUploads = useCallback(
+    (recordId, inputs) => {
+      const pending = photoUploadInFlightRef.current.get(recordId);
+      if (pending) return pending;
+      const record = recordForPhotoAction(recordId);
+      const identity = { id: record.id, coupleId: record.coupleId };
+      const operation = (async () => {
+        const results = await api.uploadVisitPhotos(identity, inputs);
+        mergePhotoUploads(recordId, results);
+        if (results.some((result) => result.status === 'succeeded')) await refreshRecords();
+        return results;
+      })().finally(() => photoUploadInFlightRef.current.delete(recordId));
+      photoUploadInFlightRef.current.set(recordId, operation);
+      return operation;
+    },
+    [mergePhotoUploads, recordForPhotoAction, refreshRecords],
+  );
+
+  const savePhotoDeleteState = useCallback((recordId, photoId, result) => {
+    setPhotoDeletesByRecord((current) => {
+      const next = {
+        ...current,
+        [recordId]: { ...(current[recordId] ?? {}), [photoId]: result },
+      };
+      photoDeletesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const runPhotoDelete = useCallback(
+    (recordId, photo, previous) => {
+      const key = `${recordId}:${photo?.id ?? 'invalid'}`;
+      const pending = photoDeleteInFlightRef.current.get(key);
+      if (pending) return pending;
+      const operation = (async () => {
+        const result = await api.deleteVisitPhoto(photo, previous);
+        savePhotoDeleteState(recordId, photo.id, result);
+        if (result.status === 'succeeded') await refreshRecords();
+        return result;
+      })().finally(() => photoDeleteInFlightRef.current.delete(key));
+      photoDeleteInFlightRef.current.set(key, operation);
+      return operation;
+    },
+    [refreshRecords, savePhotoDeleteState],
+  );
 
   const actions = useMemo(
     () => ({
@@ -102,8 +188,39 @@ export function AppProvider({ children }) {
         await refreshRecords();
         return rec;
       },
+      addVisitPhotos(recordId, files) {
+        return runPhotoUploads(recordId, files);
+      },
+      retryVisitPhotoUploads(recordId) {
+        const existing = photoUploadsRef.current[recordId] ?? [];
+        const failed = existing.filter((upload) => upload.status === 'failed');
+        if (!failed.length) {
+          if (existing.some((upload) => upload.status === 'succeeded')) {
+            return refreshRecords().then(() => existing);
+          }
+          return Promise.resolve(existing);
+        }
+        return runPhotoUploads(recordId, failed);
+      },
+      deleteVisitPhoto(recordId, requestedPhoto) {
+        const record = recordForPhotoAction(recordId);
+        const photo = record.photos?.find((item) => item.id === requestedPhoto?.id) ?? requestedPhoto;
+        const previous = photoDeletesRef.current[recordId]?.[photo?.id];
+        return runPhotoDelete(recordId, photo, previous);
+      },
+      retryDeleteVisitPhoto(recordId, photoId) {
+        const record = recordForPhotoAction(recordId);
+        const photo = record.photos?.find((item) => item.id === photoId);
+        if (!photo) {
+          return Promise.reject(
+            new AppError(ERROR_CODES.not_found, { cause: { resource: 'photo' } }),
+          );
+        }
+        const previous = photoDeletesRef.current[recordId]?.[photoId];
+        return runPhotoDelete(recordId, photo, previous);
+      },
     }),
-    [refreshRecords],
+    [recordForPhotoAction, refreshRecords, runPhotoDelete, runPhotoUploads],
   );
 
   const ready = bootstrapStatus === 'ready';
@@ -115,6 +232,8 @@ export function AppProvider({ children }) {
       bootstrapStatus,
       bootstrapError,
       retryBootstrap,
+      photoUploadsByRecord,
+      photoDeletesByRecord,
       ...actions,
     }),
     [
@@ -124,6 +243,8 @@ export function AppProvider({ children }) {
       bootstrapStatus,
       bootstrapError,
       retryBootstrap,
+      photoUploadsByRecord,
+      photoDeletesByRecord,
       actions,
     ],
   );

@@ -386,4 +386,61 @@ describe('data API facade', () => {
     });
     expect(client.calls.rpc).toEqual([]);
   });
+
+  it('facade가 사진 입력을 바꾸지 않고 private storage 업로드 상태를 파일별로 돌려준다', async () => {
+    const source = new File(['image'], 'memory.jpg', { type: 'image/jpeg' });
+    const files = Object.freeze([source]);
+    const client = createFakeSupabaseClient({
+      userId: ME,
+      storage: {
+        'visit-photos': {
+          upload: ({ path }) => ({ path }),
+        },
+      },
+      rpc: {
+        register_visit_photo: okEnvelope({ photo_id: 'photo-1', ordinal: 1 }),
+      },
+    });
+    __setSupabaseClient(client);
+
+    const [result] = await api.uploadVisitPhotos({ id: 'v1', coupleId: 'c1' }, files);
+
+    expect(files).toEqual([source]);
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      file: source,
+      objectUploaded: true,
+      photo: { id: 'photo-1', ownedByMe: true, order: 1 },
+    });
+    const args = lastRpcArgs(client, 'register_visit_photo');
+    expect(args.p_storage_path).toMatch(/^c1\/v1\/[^/]+\.jpg$/);
+    expect(args.p_request_key).toEqual(expect.any(String));
+    expect(args.p_metadata).toEqual({
+      content_type: 'image/jpeg',
+      byte_size: source.size,
+      width: null,
+      height: null,
+    });
+    expect(client.calls.storage[0].options).toMatchObject({ upsert: false });
+  });
+
+  it('facade에서 상대 사진 삭제 요청은 raw backend 호출 없이 안전한 실패 상태다', async () => {
+    const client = createFakeSupabaseClient({ userId: ME });
+    __setSupabaseClient(client);
+
+    const result = await api.deleteVisitPhoto({
+      id: 'partner-photo',
+      bucket: 'visit-photos',
+      path: 'c1/v1/partner.webp',
+      uploaderId: 'partner',
+      ownedByMe: false,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      error: { code: ERROR_CODES.forbidden, retryable: false },
+    });
+    expect(client.calls.storage).toEqual([]);
+    expect(client.calls.queries).toEqual([]);
+  });
 });

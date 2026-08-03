@@ -1,6 +1,8 @@
 import { AppError, ERROR_CODES } from '../errors';
 import { kakaoPlacesAdapter } from '../kakao-places';
+import { processPhotoFile as defaultProcessPhotoFile } from '../photo-files';
 import { createCouplesRepository } from './couples';
+import { createPhotosRepository } from './photos';
 import { createPlaceSearchRepository } from './places';
 import { createSessionRepository } from './session';
 import { createSettingsRepository } from './settings';
@@ -17,6 +19,8 @@ export function createRepositories({
   getClient,
   placeSearchAdapter = kakaoPlacesAdapter,
   newRequestKey = defaultRequestKey,
+  newPhotoId = defaultRequestKey,
+  processPhotoFile = defaultProcessPhotoFile,
   now = () => new Date(),
 } = {}) {
   const resolveClient =
@@ -29,6 +33,14 @@ export function createRepositories({
     typeof provided === 'string' && provided.trim() ? provided : newRequestKey();
   const session = createSessionRepository({ getClient: resolveClient });
   const places = createPlaceSearchRepository({ adapter: placeSearchAdapter });
+  const photos = createPhotosRepository({
+    getClient: resolveClient,
+    session,
+    requestKey,
+    now,
+    processPhotoFile,
+    newPhotoId,
+  });
 
   return {
     session,
@@ -39,7 +51,9 @@ export function createRepositories({
       requestKey,
       now,
       places,
+      photos,
     }),
+    photos,
     places,
     wishlist: createWishlistRepository({ getClient: resolveClient, session }),
     settings: createSettingsRepository(),

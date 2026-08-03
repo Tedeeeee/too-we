@@ -25,7 +25,7 @@ const VISIT_COLUMNS = [
   'flower_key',
   'visit_entries(author_id,note,rating,created_at)',
   'visit_tags(ordinal,label)',
-  'visit_photos(id,ordinal,storage_bucket,storage_path)',
+  'visit_photos(id,uploader_id,ordinal,storage_bucket,storage_path)',
 ].join(',');
 
 const SUPPORTED_PATCH_KEYS = new Set(['tags', 'text', 'rating', 'flower', 'date', 'place']);
@@ -154,13 +154,13 @@ const validateRecordId = (recordId) => {
   return recordId.trim();
 };
 
-export function createVisitsRepository({ getClient, session, requestKey, now, places }) {
+export function createVisitsRepository({ getClient, session, requestKey, now, places, photos }) {
   const getRecords = async () => {
     const userId = await session.ensureUserId();
     const rows = await runQuery(
       getClient().from('visits').select(VISIT_COLUMNS).order('visited_at', { ascending: false }),
     );
-    return (rows ?? []).map((row) => mapVisit(row, userId));
+    return photos.attachSignedUrls((rows ?? []).map((row) => mapVisit(row, userId)));
   };
 
   const getRecord = async (recordId) => {
@@ -169,7 +169,10 @@ export function createVisitsRepository({ getClient, session, requestKey, now, pl
     const row = await runQuery(
       getClient().from('visits').select(VISIT_COLUMNS).eq('id', id).maybeSingle(),
     );
-    return mapVisit(row, userId);
+    const record = mapVisit(row, userId);
+    if (!record) return null;
+    const [signedRecord] = await photos.attachSignedUrls([record]);
+    return signedRecord;
   };
 
   const updateSharedVisit = async (recordId, payload) => {
