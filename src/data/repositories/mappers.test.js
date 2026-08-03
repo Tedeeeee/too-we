@@ -509,20 +509,52 @@ describe('mapVisit — 화면 기록 셰이프', () => {
 });
 
 describe('mapWishlistPlace', () => {
-  it('담은 사람 이름을 프로필에서 찾아 붙인다', () => {
+  it('담은 사람 메타데이터를 유지한 채 기록 생성에 바로 쓸 수 있는 장소 스냅샷을 만든다', () => {
     const nameById = new Map([[PARTNER, '태식']]);
+    const row = Object.freeze({
+      id: 'w1',
+      place_provider: 'kakao',
+      place_provider_id: 'kakao-1',
+      place_name: '어라운드 성수',
+      place_category: '카페',
+      place_address: '서울 성동구 성수동',
+      place_road_address: '서울 성동구 성수이로 1',
+      place_url: 'https://place.map.kakao.com/kakao-1',
+      place_lat: 37.54,
+      place_lng: 127.05,
+      created_by: PARTNER,
+    });
     const item = mapWishlistPlace(
-      { id: 'w1', place_name: '어라운드 성수', place_category: '카페', created_by: PARTNER },
+      row,
       nameById,
     );
 
     expect(item).toEqual({
       id: 'w1',
+      provider: 'kakao',
+      providerId: 'kakao-1',
       name: '어라운드 성수',
       category: '카페',
+      address: '서울 성동구 성수동',
+      roadAddress: '서울 성동구 성수이로 1',
+      url: 'https://place.map.kakao.com/kakao-1',
+      lat: 37.54,
+      lng: 127.05,
       pickedBy: '태식',
       pickedByUserId: PARTNER,
     });
+    expect(toPlacePayload(item)).toEqual({
+      provider: 'kakao',
+      provider_id: 'kakao-1',
+      name: '어라운드 성수',
+      category: '카페',
+      address: '서울 성동구 성수동',
+      road_address: '서울 성동구 성수이로 1',
+      url: 'https://place.map.kakao.com/kakao-1',
+      lat: 37.54,
+      lng: 127.05,
+    });
+    expect(row.place_name).toBe('어라운드 성수');
   });
 
   it('이름을 모르면 빈 문자열이고 만들어내지 않는다', () => {
@@ -530,6 +562,39 @@ describe('mapWishlistPlace', () => {
 
     expect(item.pickedBy).toBe('');
     expect(item.category).toBe('');
+    expect(item).toMatchObject({
+      provider: 'kakao',
+      providerId: null,
+      address: null,
+      roadAddress: null,
+      url: null,
+      lat: null,
+      lng: null,
+    });
+  });
+
+  it('manual wishlist의 자체 id를 외부 장소 provider id로 오인하지 않는다', () => {
+    const item = mapWishlistPlace(
+      {
+        id: 'wishlist-row-id',
+        place_provider: 'manual',
+        place_provider_id: null,
+        place_name: '직접 입력한 곳',
+        created_by: ME,
+      },
+      new Map([[ME, '지은']]),
+    );
+
+    expect(toPlacePayload(item)).toEqual({
+      provider: 'manual',
+      name: '직접 입력한 곳',
+    });
+    expect(item).toMatchObject({
+      id: 'wishlist-row-id',
+      provider: 'manual',
+      providerId: null,
+      pickedBy: '지은',
+    });
   });
 });
 

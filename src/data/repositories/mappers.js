@@ -142,8 +142,15 @@ export function mapVisit(row, userId) {
 export function mapWishlistPlace(row, nameById) {
   return {
     id: row.id,
+    provider: row.place_provider ?? 'kakao',
+    providerId: row.place_provider_id ?? null,
     name: row.place_name,
     category: row.place_category ?? '',
+    address: row.place_address ?? null,
+    roadAddress: row.place_road_address ?? null,
+    url: row.place_url ?? null,
+    lat: row.place_lat ?? null,
+    lng: row.place_lng ?? null,
     pickedBy: nameById.get(row.created_by) ?? '',
     pickedByUserId: row.created_by,
   };
@@ -163,7 +170,12 @@ export function toPlacePayload(place) {
   const name = cleanString(place.name);
   if (!name) return null;
 
-  const providerId = cleanString(place.providerId ?? place.provider_id ?? place.id);
+  const providerIdValue = Object.hasOwn(place, 'providerId')
+    ? place.providerId
+    : Object.hasOwn(place, 'provider_id')
+      ? place.provider_id
+      : place.id;
+  const providerId = cleanString(providerIdValue);
   const payload = {
     provider: cleanString(place.provider) || (providerId ? 'kakao' : 'manual'),
   };

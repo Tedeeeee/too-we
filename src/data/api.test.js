@@ -141,6 +141,81 @@ describe('data API facade', () => {
     expect(queriesFor(client, 'visits')).toHaveLength(1);
   });
 
+  it('가고 싶은 곳 공유 CRUD와 연결 해제를 안정적인 facade 메서드로 노출한다', async () => {
+    const place = Object.freeze({
+      provider: 'kakao',
+      providerId: 'kakao-w1',
+      name: '  서울숲  ',
+      category: '  공원  ',
+      address: '  서울 성동구  ',
+      roadAddress: '  서울 성동구 뚝섬로  ',
+      url: '  https://place.map.kakao.com/kakao-w1  ',
+      lat: 37.544,
+      lng: 127.038,
+      couple_id: 'caller-must-not-control',
+      created_by: 'caller-must-not-control',
+    });
+    const original = structuredClone(place);
+    const row = {
+      id: 'w1',
+      couple_id: 'c1',
+      created_by: ME,
+      place_provider: 'kakao',
+      place_provider_id: 'kakao-w1',
+      place_name: '서울숲',
+      place_category: '공원',
+      place_address: '서울 성동구',
+      place_road_address: '서울 성동구 뚝섬로',
+      place_url: 'https://place.map.kakao.com/kakao-w1',
+      place_lat: 37.544,
+      place_lng: 127.038,
+    };
+    const client = createFakeSupabaseClient({
+      userId: ME,
+      tables: {
+        couples: [{ id: 'c1' }],
+        wishlist_places: (query) => {
+          if (query.op === 'delete') return [{ id: 'w1' }];
+          return [row];
+        },
+        profiles: [{ id: ME, display_name: '지은' }],
+      },
+      rpc: {
+        disconnect_couple: okEnvelope({ couple_id: 'c1', purge_job_id: 'private-job' }),
+      },
+    });
+    __setSupabaseClient(client);
+
+    await expect(api.createWishlistPlace(place)).resolves.toMatchObject({
+      id: 'w1',
+      providerId: 'kakao-w1',
+      pickedBy: '지은',
+    });
+    await expect(api.updateWishlistPlace('w1', place)).resolves.toMatchObject({
+      id: 'w1',
+      providerId: 'kakao-w1',
+    });
+    await expect(api.deleteWishlistPlace('w1')).resolves.toEqual({ id: 'w1' });
+    await expect(
+      api.disconnectCouple({ requestKey: 'api-disconnect-key' }),
+    ).resolves.toEqual({ disconnected: true, coupleId: 'c1', replayed: false });
+
+    expect(place).toEqual(original);
+    expect(lastRpcArgs(client, 'disconnect_couple')).toEqual({
+      p_request_key: 'api-disconnect-key',
+    });
+    expect(queriesFor(client, 'wishlist_places').map((query) => query.op)).toEqual([
+      'insert',
+      'update',
+      'delete',
+    ]);
+    for (const query of queriesFor(client, 'wishlist_places')) {
+      expect(query.payload ?? {}).not.toHaveProperty('couple_id', 'caller-must-not-control');
+      expect(query.payload ?? {}).not.toHaveProperty('created_by', 'caller-must-not-control');
+    }
+    expect(queriesFor(client, 'visits')).toEqual([]);
+  });
+
   it('새 기록 저장은 입력을 바꾸지 않고 장소·시각만 있는 대기 기록을 만든다', async () => {
     const client = createFakeSupabaseClient({
       userId: ME,

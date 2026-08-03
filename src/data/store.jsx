@@ -16,27 +16,44 @@ import { AppError, ERROR_CODES, toAppError } from './errors';
 
 const AppContext = createContext(null);
 
+const newRequestKey = () => {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  return `request-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
+
 export function AppProvider({ children }) {
   const [couple, setCouple] = useState(null);
   const [records, setRecords] = useState([]);
+  const [wishlist, setWishlist] = useState([]);
+  const [wishlistStatus, setWishlistStatus] = useState('loading');
+  const [wishlistError, setWishlistError] = useState(null);
   const [bootstrapStatus, setBootstrapStatus] = useState('loading');
   const [bootstrapError, setBootstrapError] = useState(null);
   const [photoUploadsByRecord, setPhotoUploadsByRecord] = useState({});
   const [photoDeletesByRecord, setPhotoDeletesByRecord] = useState({});
   const mountedRef = useRef(false);
   const bootstrapAttemptRef = useRef(0);
+  const wishlistAttemptRef = useRef(0);
+  const sharedDataEpochRef = useRef(0);
   const recordsRef = useRef(records);
+  const wishlistRef = useRef(wishlist);
   const photoUploadsRef = useRef(photoUploadsByRecord);
   const photoDeletesRef = useRef(photoDeletesByRecord);
   const photoUploadInFlightRef = useRef(new Map());
   const photoDeleteInFlightRef = useRef(new Map());
+  const wishlistMutationInFlightRef = useRef(new Map());
+  const profileMutationInFlightRef = useRef(null);
+  const disconnectInFlightRef = useRef(null);
+  const disconnectRetryOptionsRef = useRef(null);
 
   recordsRef.current = records;
+  wishlistRef.current = wishlist;
   photoUploadsRef.current = photoUploadsByRecord;
   photoDeletesRef.current = photoDeletesByRecord;
 
   const bootstrap = useCallback(async () => {
     const attempt = bootstrapAttemptRef.current + 1;
+    const epoch = sharedDataEpochRef.current;
     bootstrapAttemptRef.current = attempt;
     setBootstrapError(null);
     setBootstrapStatus('loading');
@@ -46,38 +63,85 @@ export function AppProvider({ children }) {
         api.getCouple(),
         api.getRecords(),
       ]);
-      if (!mountedRef.current || attempt !== bootstrapAttemptRef.current) return;
+      if (
+        !mountedRef.current ||
+        attempt !== bootstrapAttemptRef.current ||
+        epoch !== sharedDataEpochRef.current
+      ) return;
 
       setCouple(nextCouple);
       recordsRef.current = nextRecords;
       setRecords(nextRecords);
       setBootstrapStatus('ready');
     } catch (error) {
-      if (!mountedRef.current || attempt !== bootstrapAttemptRef.current) return;
+      if (
+        !mountedRef.current ||
+        attempt !== bootstrapAttemptRef.current ||
+        epoch !== sharedDataEpochRef.current
+      ) return;
 
       setBootstrapError(toAppError(error));
       setBootstrapStatus('error');
     }
   }, []);
 
+  const refreshWishlist = useCallback(async (expectedEpoch = sharedDataEpochRef.current) => {
+    const attempt = wishlistAttemptRef.current + 1;
+    wishlistAttemptRef.current = attempt;
+    if (mountedRef.current && expectedEpoch === sharedDataEpochRef.current) {
+      setWishlistStatus('loading');
+      setWishlistError(null);
+    }
+
+    try {
+      const nextWishlist = await api.getWishlist();
+      if (
+        mountedRef.current &&
+        attempt === wishlistAttemptRef.current &&
+        expectedEpoch === sharedDataEpochRef.current
+      ) {
+        wishlistRef.current = nextWishlist;
+        setWishlist(nextWishlist);
+        setWishlistStatus('ready');
+      }
+      return nextWishlist;
+    } catch (error) {
+      const appError = toAppError(error);
+      if (
+        mountedRef.current &&
+        attempt === wishlistAttemptRef.current &&
+        expectedEpoch === sharedDataEpochRef.current
+      ) {
+        setWishlistError(appError);
+        setWishlistStatus('error');
+      }
+      throw appError;
+    }
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
     bootstrap();
+    refreshWishlist().catch(() => {});
 
     return () => {
       mountedRef.current = false;
       bootstrapAttemptRef.current += 1;
+      wishlistAttemptRef.current += 1;
+      sharedDataEpochRef.current += 1;
     };
-  }, [bootstrap]);
+  }, [bootstrap, refreshWishlist]);
 
   const retryBootstrap = useCallback(() => bootstrap(), [bootstrap]);
+  const retryWishlist = useCallback(() => refreshWishlist(), [refreshWishlist]);
 
-  const refreshRecords = useCallback(async () => {
+  const refreshRecords = useCallback(async (expectedEpoch = sharedDataEpochRef.current) => {
     const nextRecords = await api.getRecords();
-    if (mountedRef.current) {
+    if (mountedRef.current && expectedEpoch === sharedDataEpochRef.current) {
       recordsRef.current = nextRecords;
       setRecords(nextRecords);
     }
+    return nextRecords;
   }, []);
 
   const recordForPhotoAction = useCallback((recordId) => {
@@ -111,10 +175,15 @@ export function AppProvider({ children }) {
       if (pending) return pending;
       const record = recordForPhotoAction(recordId);
       const identity = { id: record.id, coupleId: record.coupleId };
+      const epoch = sharedDataEpochRef.current;
       const operation = (async () => {
         const results = await api.uploadVisitPhotos(identity, inputs);
-        mergePhotoUploads(recordId, results);
-        if (results.some((result) => result.status === 'succeeded')) await refreshRecords();
+        if (epoch === sharedDataEpochRef.current) {
+          mergePhotoUploads(recordId, results);
+          if (results.some((result) => result.status === 'succeeded')) {
+            await refreshRecords(epoch);
+          }
+        }
         return results;
       })().finally(() => photoUploadInFlightRef.current.delete(recordId));
       photoUploadInFlightRef.current.set(recordId, operation);
@@ -139,10 +208,13 @@ export function AppProvider({ children }) {
       const key = `${recordId}:${photo?.id ?? 'invalid'}`;
       const pending = photoDeleteInFlightRef.current.get(key);
       if (pending) return pending;
+      const epoch = sharedDataEpochRef.current;
       const operation = (async () => {
         const result = await api.deleteVisitPhoto(photo, previous);
-        savePhotoDeleteState(recordId, photo.id, result);
-        if (result.status === 'succeeded') await refreshRecords();
+        if (epoch === sharedDataEpochRef.current) {
+          savePhotoDeleteState(recordId, photo.id, result);
+          if (result.status === 'succeeded') await refreshRecords(epoch);
+        }
         return result;
       })().finally(() => photoDeleteInFlightRef.current.delete(key));
       photoDeleteInFlightRef.current.set(key, operation);
@@ -151,42 +223,165 @@ export function AppProvider({ children }) {
     [refreshRecords, savePhotoDeleteState],
   );
 
+  const runMyNameUpdate = useCallback((name) => {
+    const pending = profileMutationInFlightRef.current;
+    if (pending) return pending;
+    const epoch = sharedDataEpochRef.current;
+
+    const operation = (async () => {
+      const nextCouple = await api.setMyName(name);
+      if (mountedRef.current && epoch === sharedDataEpochRef.current) setCouple(nextCouple);
+      return nextCouple;
+    })().finally(() => {
+      if (profileMutationInFlightRef.current === operation) {
+        profileMutationInFlightRef.current = null;
+      }
+    });
+    profileMutationInFlightRef.current = operation;
+    return operation;
+  }, []);
+
+  const runWishlistMutation = useCallback(
+    (key, mutation) => {
+      const pending = wishlistMutationInFlightRef.current.get(key);
+      if (pending) return pending;
+      const epoch = sharedDataEpochRef.current;
+
+      const operation = (async () => {
+        try {
+          const result = await mutation();
+          if (epoch === sharedDataEpochRef.current) await refreshWishlist(epoch);
+          return result;
+        } catch (error) {
+          const appError = toAppError(error);
+          if (mountedRef.current && epoch === sharedDataEpochRef.current) {
+            setWishlistError(appError);
+            setWishlistStatus('error');
+          }
+          throw appError;
+        }
+      })().finally(() => {
+        if (wishlistMutationInFlightRef.current.get(key) === operation) {
+          wishlistMutationInFlightRef.current.delete(key);
+        }
+      });
+      wishlistMutationInFlightRef.current.set(key, operation);
+      return operation;
+    },
+    [refreshWishlist],
+  );
+
+  const runDisconnect = useCallback((options) => {
+    const pending = disconnectInFlightRef.current;
+    if (pending) return pending;
+
+    const callerKey =
+      options && typeof options === 'object' && typeof options.requestKey === 'string'
+        ? options.requestKey.trim()
+        : '';
+    const safeOptions = callerKey
+      ? options
+      : (disconnectRetryOptionsRef.current ?? Object.freeze({ requestKey: newRequestKey() }));
+    disconnectRetryOptionsRef.current = safeOptions;
+
+    const operation = (async () => {
+      try {
+        const result = await api.disconnectCouple(safeOptions);
+        if (mountedRef.current) {
+          sharedDataEpochRef.current += 1;
+          bootstrapAttemptRef.current += 1;
+          wishlistAttemptRef.current += 1;
+
+          recordsRef.current = [];
+          wishlistRef.current = [];
+          photoUploadsRef.current = {};
+          photoDeletesRef.current = {};
+          setCouple(null);
+          setRecords([]);
+          setWishlist([]);
+          setWishlistStatus('ready');
+          setWishlistError(null);
+          setPhotoUploadsByRecord({});
+          setPhotoDeletesByRecord({});
+          setBootstrapStatus('ready');
+          setBootstrapError(null);
+
+          wishlistMutationInFlightRef.current.clear();
+          photoUploadInFlightRef.current.clear();
+          photoDeleteInFlightRef.current.clear();
+        }
+        disconnectRetryOptionsRef.current = null;
+        return result;
+      } catch (error) {
+        throw toAppError(error);
+      }
+    })().finally(() => {
+      if (disconnectInFlightRef.current === operation) disconnectInFlightRef.current = null;
+    });
+    disconnectInFlightRef.current = operation;
+    return operation;
+  }, []);
+
   const actions = useMemo(
     () => ({
       async startNewCouple(options) {
+        const epoch = sharedDataEpochRef.current;
         const nextCouple = await api.createCouple(options);
-        if (mountedRef.current) setCouple(nextCouple);
+        if (mountedRef.current && epoch === sharedDataEpochRef.current) setCouple(nextCouple);
       },
       async connectWithCode(code, options) {
+        const epoch = sharedDataEpochRef.current;
         const nextCouple = await api.connectWithCode(code, options);
-        if (mountedRef.current) setCouple(nextCouple);
+        if (mountedRef.current && epoch === sharedDataEpochRef.current) setCouple(nextCouple);
       },
-      async setMyName(name) {
-        const nextCouple = await api.setMyName(name);
-        if (mountedRef.current) setCouple(nextCouple);
+      setMyName(name) {
+        return runMyNameUpdate(name);
       },
       async completeOnboarding() {
+        const epoch = sharedDataEpochRef.current;
         const nextCouple = await api.completeOnboarding();
-        if (mountedRef.current) setCouple(nextCouple);
+        if (mountedRef.current && epoch === sharedDataEpochRef.current) setCouple(nextCouple);
       },
       async reissueCoupleInvite(options) {
+        const epoch = sharedDataEpochRef.current;
         const nextCouple = await api.reissueCoupleInvite(options);
-        if (mountedRef.current) setCouple(nextCouple);
+        if (mountedRef.current && epoch === sharedDataEpochRef.current) setCouple(nextCouple);
       },
       async saveFiveSecondRecord(input) {
+        const epoch = sharedDataEpochRef.current;
         const rec = await api.saveFiveSecondRecord(input);
-        await refreshRecords();
+        await refreshRecords(epoch);
         return rec;
       },
       async setRecordFlower(recordId, flowerKey) {
+        const epoch = sharedDataEpochRef.current;
         const rec = await api.setRecordFlower(recordId, flowerKey);
-        await refreshRecords();
+        await refreshRecords(epoch);
         return rec;
       },
       async updateRecord(recordId, patch) {
+        const epoch = sharedDataEpochRef.current;
         const rec = await api.updateRecord(recordId, patch);
-        await refreshRecords();
+        await refreshRecords(epoch);
         return rec;
+      },
+      createWishlistPlace(input) {
+        return runWishlistMutation('create', () => api.createWishlistPlace(input));
+      },
+      updateWishlistPlace(wishlistId, input) {
+        return runWishlistMutation(
+          `update:${wishlistId}`,
+          () => api.updateWishlistPlace(wishlistId, input),
+        );
+      },
+      deleteWishlistPlace(wishlistId) {
+        return runWishlistMutation(
+          `delete:${wishlistId}`,
+          () => api.deleteWishlistPlace(wishlistId),
+        );
+      },
+      disconnectCouple(options) {
+        return runDisconnect(options);
       },
       addVisitPhotos(recordId, files) {
         return runPhotoUploads(recordId, files);
@@ -220,7 +415,15 @@ export function AppProvider({ children }) {
         return runPhotoDelete(recordId, photo, previous);
       },
     }),
-    [recordForPhotoAction, refreshRecords, runPhotoDelete, runPhotoUploads],
+    [
+      recordForPhotoAction,
+      refreshRecords,
+      runDisconnect,
+      runMyNameUpdate,
+      runPhotoDelete,
+      runPhotoUploads,
+      runWishlistMutation,
+    ],
   );
 
   const ready = bootstrapStatus === 'ready';
@@ -229,9 +432,13 @@ export function AppProvider({ children }) {
       ready,
       couple,
       records,
+      wishlist,
+      wishlistStatus,
+      wishlistError,
       bootstrapStatus,
       bootstrapError,
       retryBootstrap,
+      retryWishlist,
       photoUploadsByRecord,
       photoDeletesByRecord,
       ...actions,
@@ -240,9 +447,13 @@ export function AppProvider({ children }) {
       ready,
       couple,
       records,
+      wishlist,
+      wishlistStatus,
+      wishlistError,
       bootstrapStatus,
       bootstrapError,
       retryBootstrap,
+      retryWishlist,
       photoUploadsByRecord,
       photoDeletesByRecord,
       actions,

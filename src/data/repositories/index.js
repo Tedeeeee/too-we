@@ -55,7 +55,7 @@ export function createRepositories({
     }),
     photos,
     places,
-    wishlist: createWishlistRepository({ getClient: resolveClient, session }),
+    wishlist: createWishlistRepository({ getClient: resolveClient, session, now }),
     settings: createSettingsRepository(),
   };
 }
