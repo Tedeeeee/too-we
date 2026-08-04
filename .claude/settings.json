@@ -1,9 +1,3 @@
 {
-  "model": "fable",
-  "fallbackModel": [
-    "opus"
-  ],
-  "env": {
-    "FALLBACK_FOR_ALL_PRIMARY_MODELS": "1"
-  }
+  "model": "claude-opus-5"
 }

@@ -46,7 +46,7 @@ Before creating an enforcement implementation worktree, commit the approved rout
 - `docs/agent-workflow.md`
 - `.claude/settings.json`
 
-The baseline keeps Fable as the initial Claude model and Opus as the Claude-internal fallback. Codex becomes eligible only after preflight proves account-wide exhaustion or Fable-to-Opus routing still ends in an account-level capacity error.
+The baseline pins the exact Claude model to `claude-opus-5` and defines no Claude-internal model fallback. Every new Claude implementation dispatch starts on `claude-opus-5`, and a temporary overload or service error retries the same model or opens a decision gate rather than routing to another Claude model. Codex becomes eligible only after preflight proves account-wide exhaustion or an actual `claude-opus-5` response proves an account-level credit, billing, or rate-limit exhaustion.
 
 ## Layer 3: Repository Guard
 

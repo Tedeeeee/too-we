@@ -58,7 +58,7 @@ main
 - 모든 root, Wave, 구현 task는 Claude를 최초 구현 작업자로 전제한다. 사용량 소진 증거가 생기기 전에 task 제목·명세·Run 목표에 Codex 구현을 미리 지정하지 않는다.
 - Codex는 구현 dispatch 직전에 Claude Code 계정이나 런타임이 제공하는 읽기 전용 사용량 상태를 확인한다. 확인 과정에서 토큰, 키 또는 계정 비밀정보를 기록하지 않는다.
 - 사용 가능하면 Claude로 dispatch한다. 사용량 상태를 확인할 수 없거나 결과가 불명확해도 소진으로 추정하지 않고 Claude를 먼저 시도한다.
-- 사전 확인에서 Claude 계정 전체의 사용량 소진이 명확히 확인되거나, 아래 Fable→Opus 라우팅까지 거친 뒤에도 계정 수준의 사용량 크레딧·결제·rate-limit 오류로 중단된 경우에만 Codex fallback을 허용한다.
+- 사전 확인에서 Claude 계정 전체의 사용량 소진이 명확히 확인되거나, Opus 5의 실제 응답이 계정 수준의 사용량 크레딧·결제·rate-limit 소진을 증명한 경우에만 Codex fallback을 허용한다.
 - 일시적 과부하나 서비스 오류는 Codex fallback 사유가 아니다. 이런 경우에는 아래 Claude 모델 라우팅을 먼저 따른다.
 
 ### 증거 기반 Codex fallback
@@ -118,20 +118,19 @@ staged tree 하나에 예약된 뒤 커밋 시 소진되어 재사용되지 않�
 
 ## Claude 모델 라우팅
 
-- 모든 새 Claude 구현 작업자는 프로젝트 설정인 `.claude/settings.json`에 따라 Fable로 시작한다.
-- Fable이 과부하되거나 일시적으로 사용할 수 없으면 Claude Code의 `fallbackModel` 설정으로 해당 요청을 Opus에서 재시도한다.
-- 일반 fallback은 한 요청에만 적용되며, 다음 요청에서는 Fable을 다시 우선 시도한다.
-- 사용량 크레딧, 결제 또는 rate-limit 오류는 Claude Code의 일반 fallback을 작동시키지 않는다.
-- Fable 작업자가 사용량 제한으로 중단되면 해당 Orca task를 실패 처리하거나 새 worktree를 만들지 않는다.
-- Codex는 기존 worktree, 브랜치, task 상태와 완료된 변경을 보존하고, 막힌 Fable 세션을 정지하거나 유휴 상태로 만든 뒤 같은 worktree에서 다음 명령으로 Opus 세션을 시작한다.
+- 모든 새 Claude 구현 작업자는 프로젝트 설정인 `.claude/settings.json`에 고정된 `claude-opus-5`로 시작한다.
+- 이 저장소에는 Claude 내부 모델 대체 경로가 없다. `.claude/settings.json`은 `model` 하나만 지정하고, 모델 대체 설정 키나 주 모델 전체에 대체를 적용하는 환경변수를 두지 않는다.
+- 구현 dispatch를 다른 Claude 모델로 대체하지 않는다. 명세, task 제목, dispatch 명령에 다른 Claude 모델을 지정하지 않는다.
+- 일시적 과부하나 서비스 오류는 모델 전환 사유가 아니다. 같은 `claude-opus-5`로 재시도하거나 사용자 decision gate를 연다.
+- 재시도가 필요하면 기존 worktree, 브랜치, task 상태와 완료된 변경을 보존한 채 같은 worktree에서 같은 모델로 세션을 이어간다.
 
 ```bash
-claude --model opus --continue
+claude --model claude-opus-5 --continue
 ```
 
-- Codex는 미완료 task를 Opus 세션에 다시 dispatch하고 이미 끝난 구현 단계를 반복하지 않도록 명세에 현재 진행 상태를 포함한다.
-- Opus로 완료된 결과도 동일한 `worker_done`과 Codex 리뷰 게이트를 통과해야 한다.
-- Fable과 Opus를 모두 사용할 수 없으면 위의 증거 기반 Codex fallback 게이트를 적용한다. 사용량 소진 증거가 불명확하면 다른 모델로 임의 전환하지 않고 decision gate로 사용자에게 알린다.
+- Codex는 미완료 task를 다시 dispatch할 때 이미 끝난 구현 단계를 반복하지 않도록 명세에 현재 진행 상태를 포함한다.
+- 재시도로 완료된 결과도 동일한 `worker_done`과 Codex 리뷰 게이트를 통과해야 한다.
+- Opus 5를 쓸 수 없으면 위의 증거 기반 Codex fallback 게이트를 적용한다. 사용량 소진 증거가 불명확하면 다른 모델로 임의 전환하지 않고 decision gate로 사용자에게 알린다.
 
 ## 작업 명세 필수 항목
 

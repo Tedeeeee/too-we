@@ -6,8 +6,9 @@ Codex는 이 저장소에서 Orca 코디네이터, 코드 리뷰어, 통합 담�
 
 - 승인된 기획을 작업 DAG와 작은 Claude 구현 작업으로 분해한다.
 - 구현 작업은 반드시 Claude에게 최초 배정하고 Claude worktree에서 시작한다.
+- 모든 Claude 구현 dispatch는 `.claude/settings.json`에 고정된 `claude-opus-5`로 시작한다. 다른 Claude 모델로 대체 라우팅하지 않는다.
 - 구현 dispatch 직전에 읽기 전용으로 확인 가능한 Claude 사용량 상태를 확인한다. 사용 가능하거나 확인 결과가 불명확하면 Claude를 우선 시도한다.
-- 사전 확인으로 Claude 계정 전체의 사용량 소진이 증명되거나, Fable→Opus 라우팅까지 거친 뒤에도 계정 수준의 사용량 크레딧·결제·rate-limit 소진이 실제 응답으로 증명된 경우에만 별도 Codex 구현 작업자로 전환할 수 있다. 단일 모델의 일시적 과부하, 서비스 오류, 편의는 전환 사유가 아니다.
+- 사전 확인으로 Claude 계정 전체의 사용량 소진이 증명되거나, Opus 5의 실제 응답으로 계정 수준의 사용량 크레딧·결제·rate-limit 소진이 증명된 경우에만 별도 Codex 구현 작업자로 전환할 수 있다. 일시적 과부하, 서비스 오류, 편의는 전환 사유가 아니다. 이런 경우에는 같은 Opus 5로 재시도하거나 decision gate를 연다.
 - Claude가 보낸 커밋과 테스트 결과를 리뷰한다.
 - 문제가 있으면 원래 구현 작업자에게 수정 작업을 재배정한다.
 - 승인된 결과만 `codex/mvp-integration` 브랜치에 병합한다.
@@ -21,7 +22,7 @@ Codex는 제품 기능을 새로 구현하는 주 작업자가 아니다. 단순
 - root, Wave 또는 구현 task 명세에 Codex를 최초 구현 작업자로 미리 지정하지 않는다.
 - fallback은 기존 Run, Task, worktree, 브랜치와 완료된 변경을 보존한다. 사용량 소진만을 이유로 새 Run, 새 Task 또는 새 worktree를 만들거나 완료된 구현을 반복하지 않는다.
 - fallback 기록에는 원래 Task와 Dispatch, 사용량 확인 출처와 오류 종류, 확인 시각, 완료된 작업, 남은 범위를 포함한다. 사전 확인으로 Claude Dispatch를 만들지 않았다면 그 사실을 명시한다.
-- 사용량 상태를 확인할 수 없거나 오류 의미가 불명확하면 소진으로 간주하지 않고 Claude를 먼저 시도하거나 사용자 decision gate를 연다.
+- 사용량 상태를 확인할 수 없거나 오류 의미가 불명확하면 소진으로 간주하지 않고 Opus 5를 먼저 시도하거나 사용자 decision gate를 연다.
 - Codex 구현을 시작하기 전에 기존 Claude 터미널을 정지하거나 유휴 상태로 만들어 동시 편집을 막는다. Codex 구현 터미널과 Codex 코디네이터·리뷰 터미널은 반드시 분리한다.
 - Codex fallback 결과도 Claude 결과와 동일한 테스트, `worker_done`, 독립 리뷰 및 통합 게이트를 통과해야 한다.
 
