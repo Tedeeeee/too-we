@@ -1382,15 +1382,23 @@ describe('database scenario tests are present as SQL', () => {
   /* -- each script has to bring pgTAP's own visibility with it --------------- */
 
   /**
-   * pgTAP is installed in the `extensions` schema, and a pg_prove login session
-   * does not inherit the visibility an interactive SQL console happens to have. A
+   * pgTAP is installed in the `extensions` schema, and the linked CLI enables it
+   * on a connection that has already run `set session role postgres` — while
+   * pg_prove connects separately as the temp login named in PGUSER, which holds no
+   * usage on that schema. So visibility is two problems, not one: the schema has
+   * to be reachable *and* on the search_path, before the first plan() call. A
    * script that calls plan() first dies on statement one and reports zero
-   * assertions instead of a failure anyone can read, so every file must open with
-   * exactly these statements, in this order.
+   * assertions instead of a failure anyone can read.
+   *
+   * The grant is transaction scoped like everything else here; the rollback at the
+   * end of each file removes it, so no file changes a lasting privilege.
    */
   const BOOTSTRAP = [
     'begin;',
     'create extension if not exists pgtap with schema extensions;',
+    'set local role postgres;',
+    'grant usage on schema extensions to public;',
+    'reset role;',
     'set local search_path = extensions, public, pg_catalog;',
   ];
 
@@ -1410,24 +1418,41 @@ describe('database scenario tests are present as SQL', () => {
     const wrong = [];
     for (const file of sqlTestFiles()) {
       const lines = codeLines(readSqlTest(file));
+      const head = lines.slice(0, BOOTSTRAP.length);
       // Exact text and exact position, so a missing pg_catalog, a reordered or
-      // extra schema, and a session-wide SET in place of SET LOCAL all fail here.
-      if (lines.slice(0, 3).join(' ') !== BOOTSTRAP.join(' ')) {
-        wrong.push(`${file}: opens with ${lines.slice(0, 3).join(' ') || '(nothing)'}`);
-      } else if (!/^select plan\(\d+\);$/.test(lines[3] ?? '')) {
-        wrong.push(`${file}: statement 4 is ${lines[3] ?? '(nothing)'}, not select plan(n)`);
+      // extra schema, a dropped grant, and a session-wide SET or SET ROLE in place
+      // of the SET LOCAL forms all fail here.
+      if (head.join(' ') !== BOOTSTRAP.join(' ')) {
+        wrong.push(`${file}: opens with ${head.join(' ') || '(nothing)'}`);
+      } else if (!/^select plan\(\d+\);$/.test(lines[BOOTSTRAP.length] ?? '')) {
+        wrong.push(
+          `${file}: statement ${BOOTSTRAP.length + 1} is ${
+            lines[BOOTSTRAP.length] ?? '(nothing)'
+          }, not select plan(n)`,
+        );
       }
     }
     expect(wrong).toEqual([]);
   });
 
-  it('sets search_path nowhere else, so nothing outlives the rollback', () => {
-    // pg_prove reuses one connection for the whole file list, so a search_path
-    // that survives the rollback would decide what the next script resolves.
+  it('touches search_path and privileges nowhere else, so nothing outlives the rollback', () => {
+    // pg_prove reuses one connection for the whole file list, so anything that
+    // survives the rollback would decide what the next script sees. A second grant,
+    // or one aimed at a role or a default privilege, would do exactly that.
     const wrong = [];
     for (const file of sqlTestFiles()) {
-      const hits = codeLines(readSqlTest(file)).filter((l) => /search_path/i.test(l));
-      if (hits.length !== 1) wrong.push(`${file}: ${hits.length} search_path statements`);
+      const lines = codeLines(readSqlTest(file));
+      const once = (label, re) => {
+        const hits = lines.filter((l) => re.test(l));
+        if (hits.length !== 1) wrong.push(`${file}: ${hits.length} ${label} statements`);
+      };
+      once('search_path', /search_path/i);
+      once('grant', /^grant\b/i);
+      for (const line of lines) {
+        if (/^alter\s+(role|user|database|default\s+privileges)\b/i.test(line)) {
+          wrong.push(`${file}: ${line}`);
+        }
+      }
     }
     expect(wrong).toEqual([]);
   });

@@ -12,8 +12,14 @@
 
 begin;
 
--- A pg_prove session does not see pgTAP in the extensions schema on its own.
+-- The linked CLI enables pgTAP on a `set session role postgres` connection, but
+-- pg_prove connects as the temp login in PGUSER, which holds no usage on the
+-- extensions schema. Grant and search_path are transaction only: the rollback
+-- at the end of this file removes both, so no lasting privilege changes.
 create extension if not exists pgtap with schema extensions;
+set local role postgres;
+grant usage on schema extensions to public;
+reset role;
 set local search_path = extensions, public, pg_catalog;
 
 select plan(19);
