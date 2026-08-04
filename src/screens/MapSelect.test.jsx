@@ -10,13 +10,36 @@ import MapSelect from './MapSelect';
 
 const mapViewCalls = vi.hoisted(() => vi.fn());
 
+// 지도 층 쌓임 계약(MapView.test.jsx가 실제 구현 쪽을 고정한다): 지도는 화면의
+// 가장 아래 한 층으로 격리되고, 그 안의 SDK pane은 z-index가 수천대여도 이 층을
+// 벗어나지 못한다. MapSelect의 오버레이는 모두 그 위 한 층에 있어야 한다.
+const MAP_LAYER_Z_INDEX = vi.hoisted(() => 0);
+const SDK_PANE_Z_INDEX = vi.hoisted(() => 10_000);
+
 vi.mock('@/data/store', () => ({ useApp: vi.fn() }));
 vi.mock('@/data/api', () => ({ getNearbyPlaces: vi.fn() }));
 vi.mock('@/components/MapView', () => ({
   default: (props) => {
     mapViewCalls(props);
     return (
-      <div aria-label="지도 테스트 대역">
+      <div
+        aria-label="지도 테스트 대역"
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: props.width,
+          height: props.height,
+          overflow: 'hidden',
+          zIndex: MAP_LAYER_Z_INDEX,
+          isolation: 'isolate',
+        }}
+      >
+        {/* 평범한 div가 아니라 실제 SDK처럼 높은 z-index pane을 심는 대역이다. */}
+        <div
+          aria-label="지도 SDK pane"
+          style={{ position: 'absolute', inset: 0, zIndex: SDK_PANE_Z_INDEX }}
+        />
         {props.markers.map((marker) => (
           <button
             key={marker.id}
@@ -30,6 +53,31 @@ vi.mock('@/components/MapView', () => ({
     );
   },
 }));
+
+// jsdom은 지정하지 않은 z-index를 'auto'가 아니라 ''로 준다. 선언 없음을 null로 모아
+// Number('') === 0에 속아 "0층으로 선언됨"으로 읽히는 일을 막는다.
+function declaredZIndex(element) {
+  const zIndex = getComputedStyle(element).zIndex;
+  return zIndex === '' || zIndex === 'auto' ? null : Number(zIndex);
+}
+
+function createsStackingContext(element) {
+  const style = getComputedStyle(element);
+  if (style.isolation === 'isolate') return true;
+  return style.position !== 'static' && declaredZIndex(element) !== null;
+}
+
+function nearestStackingContext(element) {
+  for (let node = element.parentElement; node; node = node.parentElement) {
+    if (createsStackingContext(node)) return node;
+  }
+  return null;
+}
+
+function expectAboveMapLayer(element, name) {
+  expect(declaredZIndex(element), `${name} z-index 선언`).not.toBeNull();
+  expect(declaredZIndex(element), `${name} z-index`).toBeGreaterThan(MAP_LAYER_Z_INDEX);
+}
 
 const PLACE = {
   id: '28720295',
@@ -417,6 +465,46 @@ describe('MapSelect selection and route intent', () => {
 
     await user.click(screen.getByRole('button', { name: '도착 화면 뒤로' }));
     expect(await screen.findByText('마이페이지 화면')).toBeInTheDocument();
+  });
+});
+
+describe('MapSelect map layering', () => {
+  it('지도 SDK pane을 지도 층에 가두고 상단 오버레이와 바텀시트를 그 위에 유지한다', async () => {
+    const user = userEvent.setup();
+    useApp.mockReturnValue({ records: [{ tags: ['# 첫째', '# 둘째'] }] });
+    api.getNearbyPlaces.mockResolvedValue([{ ...PLACE }]);
+    renderMap();
+
+    const mapLayer = screen.getByLabelText('지도 테스트 대역');
+    const sdkPane = screen.getByLabelText('지도 SDK pane');
+    const sheet = screen.getByText('주변 장소').parentElement;
+
+    // 회귀의 전제: pane은 모든 오버레이보다 높은 z-index를 요구한다.
+    expect(declaredZIndex(sdkPane)).toBe(SDK_PANE_Z_INDEX);
+    expect(declaredZIndex(mapLayer)).toBe(MAP_LAYER_Z_INDEX);
+    expect(nearestStackingContext(sdkPane)).toBe(mapLayer);
+
+    const overlays = [
+      ['뒤로가기 버튼', screen.getByRole('button', { name: '뒤로' })],
+      ['장소 검색 폼', screen.getByRole('search')],
+      ['위치 상태', screen.getByRole('status', { name: '위치 상태' })],
+      // 칩 span → 칩 → 절대 배치된 칩 행
+      ['메모 칩', screen.getByText('첫째').parentElement.parentElement],
+      ['검색 결과 바텀시트', sheet],
+    ];
+
+    for (const [name, element] of overlays) {
+      expectAboveMapLayer(element, name);
+      expect(getComputedStyle(element).pointerEvents, `${name} pointer-events`).not.toBe('none');
+    }
+
+    // 층을 나눠도 검색 입력과 결과 클릭은 그대로 동작한다.
+    await submitKeyword(user, '성수 카페');
+    const result = await screen.findByRole('button', { name: resultName(PLACE) });
+    await user.click(result);
+
+    expect(result).toHaveAttribute('aria-pressed', 'true');
+    expectAboveMapLayer(result.parentElement, '결과 행을 담은 바텀시트');
   });
 });
 

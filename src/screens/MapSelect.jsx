@@ -11,6 +11,12 @@ import { useApp } from '@/data/store';
 import * as api from '@/data/api';
 
 const DEFAULT_CENTER = { lat: 37.5443, lng: 127.0557 };
+/**
+ * 지도 위에 겹치는 요소들의 z-index. MapView가 지도(와 SDK가 심는 pane 전부)를
+ * z-index 0 한 층에 격리하므로, 지도와 겹치는 오버레이는 모두 그 바로 위 한 층에 둔다.
+ * 같은 값이라 오버레이끼리는 지금처럼 DOM 순서대로 쌓인다.
+ */
+const OVERLAY_Z_INDEX = 1;
 const GEOLOCATION_OPTIONS = {
   enableHighAccuracy: false,
   timeout: 8_000,
@@ -288,6 +294,7 @@ export default function MapSelect() {
       <BackButton
         left={16}
         top={68}
+        style={{ zIndex: OVERLAY_Z_INDEX }}
         onClick={isWishlistIntent
           ? () => navigate('/mypage/wishlist', { replace: true })
           : editRecordId && editDraft
@@ -307,6 +314,7 @@ export default function MapSelect() {
           top: 64,
           width: 328,
           height: 40,
+          zIndex: OVERLAY_Z_INDEX,
           background: palette.white,
           borderRadius: 999,
           display: 'flex',
@@ -375,6 +383,7 @@ export default function MapSelect() {
           left: 58,
           top: 158,
           maxWidth: 310,
+          zIndex: OVERLAY_Z_INDEX,
           padding: '3px 10px',
           borderRadius: 999,
           background: 'rgba(255,252,244,0.9)',
@@ -386,7 +395,7 @@ export default function MapSelect() {
         {locationMessage}
       </div>
 
-      <div style={{ position: 'absolute', left: 47, top: 115, display: 'flex', flexDirection: 'row', gap: 12 }}>
+      <div style={{ position: 'absolute', left: 47, top: 115, zIndex: OVERLAY_Z_INDEX, display: 'flex', flexDirection: 'row', gap: 12 }}>
         {memoChips.map((text, index) => (
           <div
             key={`${text}-${index}`}
@@ -433,6 +442,7 @@ export default function MapSelect() {
           top: 522,
           width: 402,
           height: 352,
+          zIndex: OVERLAY_Z_INDEX,
           background: palette.sheet,
           borderRadius: '24px 24px 0 0',
         }}

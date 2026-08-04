@@ -12,6 +12,13 @@ const validCoordinate = (lat, lng) =>
 
 const markerKey = (id) => `${typeof id}:${String(id)}`;
 
+/**
+ * 지도 층의 z-index. Kakao SDK는 컨테이너 안에 z-index가 수천대인 pane을 직접 심는데,
+ * 지도 루트가 쌓임 문맥을 만들지 않으면 그 pane들이 형제 오버레이(검색 필드·뒤로가기·
+ * 바텀시트)를 덮는다. 지도는 화면의 가장 아래 한 층으로 격리한다.
+ */
+const MAP_LAYER_Z_INDEX = 0;
+
 const normalizedMarkers = (markers) => {
   const unique = new Map();
   for (const marker of Array.isArray(markers) ? markers : []) {
@@ -157,6 +164,9 @@ export default function MapView({
         width,
         height,
         overflow: 'hidden',
+        // zIndex만으로도 쌓임 문맥이 생기지만, isolation이 그 의도를 이름으로 남긴다.
+        zIndex: MAP_LAYER_Z_INDEX,
+        isolation: 'isolate',
         background: palette.mapArea,
       }}
     >
