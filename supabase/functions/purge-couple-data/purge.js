@@ -53,36 +53,44 @@ const parseBearer = (request) => {
   return { authorization, token: match[1] };
 };
 
-const validatedOrigin = (requestUrl, configuredUrl) => {
-  let invoked;
+// The inbound request URL is deliberately not an input here. The URL a hosted
+// invocation reaches the worker on can differ from the project origin, so
+// requiring the two to match turned that difference into invalid_server_config
+// for the scheduled run we reproduced. It must not become an input again either:
+// request.url is caller-controlled, and letting it pick the outbound origin would
+// turn this worker into an SSRF relay for its own bearer token. Every outbound
+// REST and Storage destination is built from the origin returned here, which comes
+// only from the configured value.
+const validatedOrigin = (configuredUrl) => {
   let configured;
   try {
-    invoked = new URL(requestUrl);
     configured = new URL(configuredUrl);
   } catch {
     fail('invalid_server_config');
   }
 
-  const isValidProjectUrl = (url) =>
-    url.protocol === 'https:' &&
-    SUPABASE_HOST_PATTERN.test(url.hostname) &&
-    url.port === '' &&
-    url.username === '' &&
-    url.password === '';
+  // new URL() erases a port that equals the scheme default, so a configured
+  // '...supabase.co:443' parses with an empty .port and an origin identical to the
+  // bare host — a parsed no-port check alone accepts it. Requiring the configured
+  // text to already be the normalized origin closes that: any port, credential,
+  // path, query, or fragment the parser had to strip or move makes the two differ.
+  // A non-default port survives into .origin, so the .port check below carries it.
+  const normalized = String(configuredUrl).trim().toLowerCase();
+  const isOriginText =
+    normalized === configured.origin || normalized === `${configured.origin}/`;
 
-  const configuredHasOnlyOrigin =
+  const isBareProjectOrigin =
+    isOriginText &&
+    configured.protocol === 'https:' &&
+    SUPABASE_HOST_PATTERN.test(configured.hostname) &&
+    configured.port === '' &&
+    configured.username === '' &&
+    configured.password === '' &&
     (configured.pathname === '' || configured.pathname === '/') &&
     configured.search === '' &&
     configured.hash === '';
 
-  if (
-    !isValidProjectUrl(invoked) ||
-    !isValidProjectUrl(configured) ||
-    !configuredHasOnlyOrigin ||
-    invoked.origin !== configured.origin
-  ) {
-    fail('invalid_server_config');
-  }
+  if (!isBareProjectOrigin) fail('invalid_server_config');
 
   return configured.origin;
 };
@@ -252,7 +260,7 @@ export function createPurgeHandler({
 
     let origin;
     try {
-      origin = validatedOrigin(request.url, getEnv('SUPABASE_URL'));
+      origin = validatedOrigin(getEnv('SUPABASE_URL'));
     } catch {
       return errorResponse(500, 'invalid_server_config');
     }

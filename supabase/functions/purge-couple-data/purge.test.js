@@ -350,18 +350,104 @@ describe('purge-couple-data worker', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it('rejects a configured origin that is not the invoked Supabase project', async () => {
-    const fetchImpl = vi.fn();
-    const handler = createPurgeHandler({
-      fetchImpl,
-      getEnv: () => 'https://other-project.supabase.co',
+  it('derives the outbound origin from SUPABASE_URL when the invocation URL differs', async () => {
+    // The URL a hosted run reaches the worker on can differ from the project
+    // origin. This placeholder stands in for such a URL; the exact runtime-facing
+    // form is not something this test claims to know. Requiring request.url to
+    // match SUPABASE_URL turns any such difference into a 500, which is what the
+    // reproduced scheduled run hit.
+    const hostedInvocationUrl = 'http://invocation-host.example:8000/purge-couple-data';
+    const fetchImpl = vi.fn(async (url) => {
+      expect(new URL(url).origin).toBe(PROJECT_ORIGIN);
+      expect(new URL(url).pathname).toBe('/rest/v1/rpc/claim_purge_jobs');
+      return jsonResponse(ok({ jobs: [] }));
     });
 
-    const response = await handler(request());
+    const response = await handlerFor(fetchImpl)(request({ url: hostedInvocationUrl }));
 
-    expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({ ok: false, error: { code: 'invalid_server_config' } });
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, claimed: 0 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('never lets the inbound request URL steer the outbound origin', async () => {
+    const hostileUrls = [
+      // A different project that would still satisfy the project-host pattern.
+      'https://attacker-project.supabase.co/functions/v1/purge-couple-data',
+      // A host that merely suffixes the project origin.
+      'https://project-ref.supabase.co.attacker.example/functions/v1/purge-couple-data',
+      'https://attacker.example.com/functions/v1/purge-couple-data',
+      'http://127.0.0.1:8000/functions/v1/purge-couple-data',
+    ];
+
+    for (const url of hostileUrls) {
+      const origins = [];
+      const fetchImpl = vi.fn(async (target) => {
+        origins.push(new URL(target).origin);
+        return jsonResponse(ok({ jobs: [] }));
+      });
+
+      const response = await handlerFor(fetchImpl)(request({ url }));
+
+      expect(response.status, url).toBe(200);
+      expect(origins, url).toEqual([PROJECT_ORIGIN]);
+    }
+  });
+
+  it('rejects every SUPABASE_URL that is not a bare HTTPS project origin', async () => {
+    const rejected = [
+      undefined,
+      '',
+      'not-a-url',
+      'http://project-ref.supabase.co',
+      'https://project-ref.supabase.co:8443',
+      // new URL() erases a port equal to the scheme default, so an explicitly
+      // written :443 parses with an empty .port and a bare-origin .origin. It is
+      // still a configured port, and the no-port requirement has to reject it.
+      'https://project-ref.supabase.co:443',
+      'https://project-ref.supabase.co:80',
+      'https://project-ref.supabase.co:',
+      'https://user:pass@project-ref.supabase.co',
+      'https://project-ref.supabase.co/rest/v1',
+      'https://project-ref.supabase.co/?p=1',
+      'https://project-ref.supabase.co/#frag',
+      'https://project-ref.example.com',
+      'https://nested.project-ref.supabase.co',
+      'https://supabase.co',
+    ];
+
+    for (const configured of rejected) {
+      const label = String(configured);
+      const fetchImpl = vi.fn();
+      const handler = createPurgeHandler({ fetchImpl, getEnv: () => configured });
+
+      const response = await handler(request());
+
+      expect(response.status, label).toBe(500);
+      expect(await response.json(), label).toEqual({
+        ok: false,
+        error: { code: 'invalid_server_config' },
+      });
+      expect(fetchImpl, label).not.toHaveBeenCalled();
+    }
+  });
+
+  it('accepts a bare project origin with or without its root slash', async () => {
+    // Guards the no-port tightening above from over-rejecting: the two forms the
+    // platform can legitimately hand the worker must both still resolve.
+    for (const configured of [PROJECT_ORIGIN, `${PROJECT_ORIGIN}/`]) {
+      const origins = [];
+      const fetchImpl = vi.fn(async (url) => {
+        origins.push(new URL(url).origin);
+        return jsonResponse(ok({ jobs: [] }));
+      });
+      const handler = createPurgeHandler({ fetchImpl, getEnv: () => configured });
+
+      const response = await handler(request());
+
+      expect(response.status, configured).toBe(200);
+      expect(origins, configured).toEqual([PROJECT_ORIGIN]);
+    }
   });
 
   it('forwards a browser JWT unchanged and redacts the service-only RPC rejection', async () => {
