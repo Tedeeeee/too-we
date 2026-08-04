@@ -9,12 +9,12 @@ begin;
 
 -- The linked CLI enables pgTAP on a `set session role postgres` connection, but
 -- pg_prove connects as the temp login in PGUSER, which holds no usage on the
--- extensions schema. Grant and search_path are transaction only: the rollback
--- at the end of this file removes both, so no lasting privilege changes.
+-- extensions, app or auth schemas. So stay postgres for fixture setup, and hand
+-- back from a role block with `set local role postgres;` -- never `reset role;`,
+-- which restores that login. Transaction only: the rollback removes the grant.
 create extension if not exists pgtap with schema extensions;
 set local role postgres;
 grant usage on schema extensions to public;
-reset role;
 set local search_path = extensions, public, pg_catalog;
 
 select plan(22);
@@ -34,7 +34,7 @@ select public.create_couple('F1', null, 'req-f-create');
 -- A visit is created empty and enriched afterwards, which is the only shape the
 -- RPC surface allows.
 select public.create_visit(jsonb_build_object('name', '성수동 블루보틀'), now(), 'req-f-visit');
-reset role;
+set local role postgres;
 
 create temporary table ctx as
 select v.id as visit_id, v.couple_id as couple_id, v.couple_id::text || '/' || v.id::text || '/' as prefix
@@ -57,7 +57,7 @@ update public.visits set flower_key = 'rose' where id = (select visit_id from ct
 select public.set_visit_tags((select visit_id from ctx), array['# 창가 자리', '# 사진 굿']);
 select public.upsert_my_visit_entry((select visit_id from ctx), 'F1의 한 줄', 4::smallint);
 select public.register_visit_photo((select visit_id from ctx), (select prefix from ctx) || 'p1.bin');
-reset role;
+set local role postgres;
 
 select set_config('request.jwt.claims', json_build_object('sub', 'ffffffff-0000-0000-0000-000000000002', 'role', 'authenticated')::text, true);
 set local role authenticated;
@@ -93,7 +93,7 @@ select is((select count(*)::int from public.visits), 0, 'the requester loses the
 select is((select count(*)::int from public.visit_entries), 0, 'the requester loses the entries at once');
 select is((select count(*)::int from public.wishlist_places), 0, 'the requester loses the wishlist at once');
 select is((select count(*)::int from public.couples), 0, 'the couple is no longer visible');
-reset role;
+set local role postgres;
 
 -- ...and for the other member.
 select set_config('request.jwt.claims', json_build_object('sub', 'ffffffff-0000-0000-0000-000000000001', 'role', 'authenticated')::text, true);
@@ -111,7 +111,7 @@ select is(
   'true',
   'a repeated disconnect reports the existing state'
 );
-reset role;
+set local role postgres;
 
 /* ---------- the queued purge job ---------- */
 
@@ -168,7 +168,7 @@ select is(
   'succeeded',
   'the job closes once the purge and every object are recorded'
 );
-reset role;
+set local role postgres;
 
 select is(
   (

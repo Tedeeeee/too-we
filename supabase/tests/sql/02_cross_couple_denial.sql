@@ -7,12 +7,12 @@ begin;
 
 -- The linked CLI enables pgTAP on a `set session role postgres` connection, but
 -- pg_prove connects as the temp login in PGUSER, which holds no usage on the
--- extensions schema. Grant and search_path are transaction only: the rollback
--- at the end of this file removes both, so no lasting privilege changes.
+-- extensions, app or auth schemas. So stay postgres for fixture setup, and hand
+-- back from a role block with `set local role postgres;` -- never `reset role;`,
+-- which restores that login. Transaction only: the rollback removes the grant.
 create extension if not exists pgtap with schema extensions;
 set local role postgres;
 grant usage on schema extensions to public;
-reset role;
 set local search_path = extensions, public, pg_catalog;
 
 select plan(10);
@@ -39,7 +39,7 @@ select public.create_visit(
   'req-a-visit'
 );
 select public.upsert_my_visit_entry((select id from public.visits limit 1), '단풍이 좋았다', 5::smallint);
-reset role;
+set local role postgres;
 
 -- Second member of couple A, so the couple is full.
 select set_config('request.jwt.claims', json_build_object('sub', 'aaaaaaaa-0000-0000-0000-000000000002', 'role', 'authenticated')::text, true);
@@ -55,7 +55,7 @@ values (
   'aaaaaaaa-0000-0000-0000-000000000002',
   '어라운드 성수'
 );
-reset role;
+set local role postgres;
 
 /* ---------- an outsider with their own couple ---------- */
 
@@ -74,7 +74,7 @@ select is(
   'outsider cannot read a profile outside their couple'
 );
 
-reset role;
+set local role postgres;
 -- Capture the other couple's identifiers, then hand them to the outsider.
 create temporary table leaked as
 select
@@ -118,6 +118,6 @@ select is(
   'a user who already has an active couple cannot join another'
 );
 
-reset role;
+set local role postgres;
 select * from finish();
 rollback;

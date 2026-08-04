@@ -23,12 +23,12 @@ begin;
 
 -- The linked CLI enables pgTAP on a `set session role postgres` connection, but
 -- pg_prove connects as the temp login in PGUSER, which holds no usage on the
--- extensions schema. Grant and search_path are transaction only: the rollback
--- at the end of this file removes both, so no lasting privilege changes.
+-- extensions, app or auth schemas. So stay postgres for fixture setup, and hand
+-- back from a role block with `set local role postgres;` -- never `reset role;`,
+-- which restores that login. Transaction only: the rollback removes the grant.
 create extension if not exists pgtap with schema extensions;
 set local role postgres;
 grant usage on schema extensions to public;
-reset role;
 set local search_path = extensions, public, pg_catalog;
 
 select plan(14);
@@ -53,14 +53,14 @@ select public.create_visit(
   '2026-05-03T10:00:00+09:00'::timestamptz,
   'req-photo-a-visit'
 );
-reset role;
+set local role postgres;
 
 /* ---------- B creates a separate couple that must never be referenced ---------- */
 
 select set_config('request.jwt.claims', json_build_object('sub', '99999999-0000-0000-0000-000000000002', 'role', 'authenticated')::text, true);
 set local role authenticated;
 select public.create_couple('B', null, 'req-photo-b-create');
-reset role;
+set local role postgres;
 
 create temporary table photo_path_ctx as
 select
@@ -256,14 +256,14 @@ select is(
   'every rejected insert left the metadata table untouched'
 );
 
-reset role;
+set local role postgres;
 
 /* ---------- so the purge snapshot can only ever describe this couple ---------- */
 
 select set_config('request.jwt.claims', json_build_object('sub', '99999999-0000-0000-0000-000000000001', 'role', 'authenticated')::text, true);
 set local role authenticated;
 select public.disconnect_couple('req-photo-a-disconnect');
-reset role;
+set local role postgres;
 
 select is_empty(
   format(

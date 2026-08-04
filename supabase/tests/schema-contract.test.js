@@ -1392,15 +1392,33 @@ describe('database scenario tests are present as SQL', () => {
    *
    * The grant is transaction scoped like everything else here; the rollback at the
    * end of each file removes it, so no file changes a lasting privilege.
+   *
+   * The bootstrap then *stays* as postgres, because the temp login cannot reach
+   * the app or auth schemas the fixtures write. `reset role` is what returns that
+   * login, so it is banned outright — a block under authenticated or service_role
+   * hands back with an explicit `set local role postgres;` instead.
    */
   const BOOTSTRAP = [
     'begin;',
     'create extension if not exists pgtap with schema extensions;',
     'set local role postgres;',
     'grant usage on schema extensions to public;',
-    'reset role;',
     'set local search_path = extensions, public, pg_catalog;',
   ];
+
+  /**
+   * The role in force for each statement line. Only `set local role` moves it, so
+   * `reset role` shows up as the temp login the CLI connected with.
+   */
+  const roleTimeline = (sql) => {
+    let role = 'the temp login';
+    return codeLines(sql).map((line) => {
+      const set = /^set local role ([a-z_]+);$/.exec(line);
+      if (set) role = set[1];
+      else if (/^reset\s+role\b/i.test(line)) role = 'the temp login';
+      return { line, role };
+    });
+  };
 
   /**
    * Statement lines, with blanks and comments dropped. A mistake here makes the
@@ -1451,6 +1469,47 @@ describe('database scenario tests are present as SQL', () => {
       for (const line of lines) {
         if (/^alter\s+(role|user|database|default\s+privileges)\b/i.test(line)) {
           wrong.push(`${file}: ${line}`);
+        }
+        // Only the pgTAP schema may be opened up, and only to get plan() resolved.
+        if (/^grant\b/i.test(line) && line !== 'grant usage on schema extensions to public;') {
+          wrong.push(`${file}: ${line}`);
+        }
+        // Session-wide forms outlive the rollback and reach the next script.
+        if (/^set\s+(role|session)\b/i.test(line)) wrong.push(`${file}: ${line}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('never hands the session back to the CLI temp login', () => {
+    // What the linked run died on: `reset role` restores the temp login named in
+    // PGUSER, which holds no usage on app or auth, so the next fixture statement
+    // fails with permission denied and the file stops before its first assertion.
+    const wrong = [];
+    for (const file of sqlTestFiles()) {
+      const timeline = roleTimeline(readSqlTest(file));
+      for (const { line } of timeline) {
+        if (/^reset\s+role\b/i.test(line)) wrong.push(`${file}: ${line}`);
+      }
+      // finish() and the rollback have to land privileged too, which also means
+      // every authenticated or service_role block has an explicit way back.
+      const last = timeline.filter(({ line }) => /^set local role /.test(line)).at(-1);
+      if (last?.role !== 'postgres') {
+        wrong.push(`${file}: last role is ${last?.role ?? '(none)'}, not postgres`);
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('runs privileged fixture setup as postgres', () => {
+    // The exact two statements the remote refused: seeding app.config and inserting
+    // the anonymous auth users. Reads of app.* under authenticated or service_role
+    // are left alone — the migrations grant those roles usage on that schema.
+    const wrong = [];
+    for (const file of sqlTestFiles()) {
+      for (const { line, role } of roleTimeline(readSqlTest(file))) {
+        if (/^(insert into auth\.|update app\.)/i.test(line) && role !== 'postgres') {
+          wrong.push(`${file}: as ${role}: ${line.slice(0, 52)}`);
         }
       }
     }

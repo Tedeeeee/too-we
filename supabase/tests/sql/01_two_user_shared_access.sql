@@ -10,12 +10,12 @@ begin;
 
 -- The linked CLI enables pgTAP on a `set session role postgres` connection, but
 -- pg_prove connects as the temp login in PGUSER, which holds no usage on the
--- extensions schema. Grant and search_path are transaction only: the rollback
--- at the end of this file removes both, so no lasting privilege changes.
+-- extensions, app or auth schemas. So stay postgres for fixture setup, and hand
+-- back from a role block with `set local role postgres;` -- never `reset role;`,
+-- which restores that login. Transaction only: the rollback removes the grant.
 create extension if not exists pgtap with schema extensions;
 set local role postgres;
 grant usage on schema extensions to public;
-reset role;
 set local search_path = extensions, public, pg_catalog;
 
 select plan(12);
@@ -51,7 +51,7 @@ select is(
   'the same request key replays instead of creating a second couple'
 );
 
-reset role;
+set local role postgres;
 select is(
   (select count(*)::int from public.couples),
   1,
@@ -78,7 +78,7 @@ select ok(
   'B joins with the active code'
 );
 
-reset role;
+set local role postgres;
 select is(
   (select count(*)::int from public.couple_members where left_at is null),
   2,
@@ -155,6 +155,6 @@ select is(
   'B reads the partner display name'
 );
 
-reset role;
+set local role postgres;
 select * from finish();
 rollback;

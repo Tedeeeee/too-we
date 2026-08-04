@@ -14,12 +14,12 @@ begin;
 
 -- The linked CLI enables pgTAP on a `set session role postgres` connection, but
 -- pg_prove connects as the temp login in PGUSER, which holds no usage on the
--- extensions schema. Grant and search_path are transaction only: the rollback
--- at the end of this file removes both, so no lasting privilege changes.
+-- extensions, app or auth schemas. So stay postgres for fixture setup, and hand
+-- back from a role block with `set local role postgres;` -- never `reset role;`,
+-- which restores that login. Transaction only: the rollback removes the grant.
 create extension if not exists pgtap with schema extensions;
 set local role postgres;
 grant usage on schema extensions to public;
-reset role;
 set local search_path = extensions, public, pg_catalog;
 
 select plan(15);
@@ -40,7 +40,7 @@ set local role authenticated;
 select public.create_couple('G1 old name', null, 'req-g-old-create');
 select public.create_visit(jsonb_build_object('name', '옛 장소'), now(), 'req-g-old-visit');
 select public.upsert_my_visit_entry((select id from public.visits limit 1), 'G1의 옛 한 줄', 3::smallint);
-reset role;
+set local role postgres;
 
 create temporary table old_ctx as
 select v.id as visit_id, v.couple_id as couple_id, v.couple_id::text || '/' || v.id::text || '/' as prefix
@@ -51,7 +51,7 @@ set local role authenticated;
 select public.register_visit_photo((select visit_id from old_ctx), (select prefix from old_ctx) || 'old.bin');
 insert into public.wishlist_places (couple_id, created_by, place_name)
 values ((select couple_id from old_ctx), '99999999-0000-0000-0000-000000000001', '옛 위시리스트');
-reset role;
+set local role postgres;
 
 select set_config('request.jwt.claims', json_build_object('sub', '99999999-0000-0000-0000-000000000002', 'role', 'authenticated')::text, true);
 set local role authenticated;
@@ -64,7 +64,7 @@ select public.join_couple_with_code(
 /* ---------- G2 disconnects, which queues the purge ---------- */
 
 select ok((public.disconnect_couple('req-g-disconnect') -> 'ok')::boolean, 'the old couple is disconnected');
-reset role;
+set local role postgres;
 
 create temporary table job as
 select id from app.purge_jobs where couple_id = (select couple_id from old_ctx);
@@ -81,13 +81,13 @@ select ok(
   'G1 can start a new couple before the old purge runs'
 );
 select public.create_visit(jsonb_build_object('name', '새 장소'), now(), 'req-g-new-visit');
-reset role;
+set local role postgres;
 
 -- G2 fails an invite guess, which is what the rate limiter counts.
 select set_config('request.jwt.claims', json_build_object('sub', '99999999-0000-0000-0000-000000000002', 'role', 'authenticated')::text, true);
 set local role authenticated;
 select public.join_couple_with_code('000000', 'req-g-bad-guess');
-reset role;
+set local role postgres;
 
 create temporary table new_ctx as
 select couple_id from public.couple_members
@@ -103,7 +103,7 @@ select isnt(
 
 set local role service_role;
 select ok((public.purge_couple_data((select id from job)) -> 'ok')::boolean, 'the old couple is purged');
-reset role;
+set local role postgres;
 
 /* ---------- the old couple is gone ---------- */
 
@@ -168,7 +168,7 @@ select is(
   'true',
   'the surviving key still replays instead of creating a second new couple'
 );
-reset role;
+set local role postgres;
 
 -- Invite attempts are user wide too, and they are the rate limiter's memory.
 select is(

@@ -14,12 +14,12 @@ begin;
 
 -- The linked CLI enables pgTAP on a `set session role postgres` connection, but
 -- pg_prove connects as the temp login in PGUSER, which holds no usage on the
--- extensions schema. Grant and search_path are transaction only: the rollback
--- at the end of this file removes both, so no lasting privilege changes.
+-- extensions, app or auth schemas. So stay postgres for fixture setup, and hand
+-- back from a role block with `set local role postgres;` -- never `reset role;`,
+-- which restores that login. Transaction only: the rollback removes the grant.
 create extension if not exists pgtap with schema extensions;
 set local role postgres;
 grant usage on schema extensions to public;
-reset role;
 set local search_path = extensions, public, pg_catalog;
 
 select plan(19);
@@ -43,7 +43,7 @@ select throws_ok(
   null,
   'an unresolved invite lifetime refuses to issue a code'
 );
-reset role;
+set local role postgres;
 
 update app.config set value = to_jsonb(0), resolved = true where key = 'invite_ttl_seconds';
 set local role authenticated;
@@ -53,7 +53,7 @@ select throws_ok(
   null,
   'a zero lifetime is refused'
 );
-reset role;
+set local role postgres;
 
 update app.config set value = to_jsonb(-60), resolved = true where key = 'invite_ttl_seconds';
 set local role authenticated;
@@ -63,7 +63,7 @@ select throws_ok(
   null,
   'a negative lifetime is refused'
 );
-reset role;
+set local role postgres;
 
 select is(
   (select count(*)::int from public.couple_invites),
@@ -78,7 +78,7 @@ update app.config set value = to_jsonb(3600), resolved = true where key = 'invit
 
 set local role authenticated;
 select public.create_couple('E1', null, 'req-e-create');
-reset role;
+set local role postgres;
 
 create temporary table ctx as
 select
@@ -115,7 +115,7 @@ select is(
   'validation_error',
   'a malformed code is a validation error, not a lookup'
 );
-reset role;
+set local role postgres;
 
 -- One active invite per couple: reissuing revokes the old one.
 select is((select count(*)::int from public.couple_invites where status = 'active'), 1, 'one active invite');
@@ -162,7 +162,7 @@ select is(
   'invite_expired',
   'a repeated attempt on an expired code still reports expiry'
 );
-reset role;
+set local role postgres;
 
 select is(
   (select status from public.couple_invites where code = (select code from ctx)),
@@ -174,7 +174,7 @@ select is(
 select set_config('request.jwt.claims', json_build_object('sub', 'eeeeeeee-0000-0000-0000-000000000001', 'role', 'authenticated')::text, true);
 set local role authenticated;
 select ok((public.reissue_couple_invite('req-e-reissue') -> 'ok')::boolean, 'the couple reissues a code');
-reset role;
+set local role postgres;
 
 select set_config('request.jwt.claims', json_build_object('sub', 'eeeeeeee-0000-0000-0000-000000000002', 'role', 'authenticated')::text, true);
 set local role authenticated;
@@ -187,7 +187,7 @@ select ok(
   )::boolean,
   'the second member joins on the reissued code'
 );
-reset role;
+set local role postgres;
 
 /* ---------- a full couple and a used code ---------- */
 
@@ -203,7 +203,7 @@ select is(
   'invite_consumed',
   'a consumed code is distinguished from an expired one'
 );
-reset role;
+set local role postgres;
 
 -- Slot uniqueness caps the couple at two even if a code were reused.
 select throws_ok(
