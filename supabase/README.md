@@ -459,10 +459,17 @@ job은 해제 후 최대 24시간 뒤에 실행될 수 있고, 그 사이에 **�
    후보로 넣는다. 재claim은 같은 `attempts` 증가를 거치므로 `purge_max_attempts`를
    넘기면 `failed`로 서서 추적 가능해진다. `due_at`은 여전히 조건에 쓰지 않는다.
 
-**임대 기간은 외부 게이트다.** 명세에도 스키마에도 그런 시간 값이 없어서 임의로 정하지
-않았다. `app.config.purge_lease_seconds`가 미해결(`null`, `resolved = false`)인 동안
-재claim은 **전혀 일어나지 않고** 동작은 지금과 완전히 같다 — 죽은 job은 운영자가 볼 수
-있게 `running`에 남는다. 값이 정해지면 마이그레이션 없이 켜진다.
+**임대 기간은 외부 게이트다.** 명세에도 스키마에도 그런 시간 값이 없어서 시드는 임의로
+정하지 않는다. `app.config.purge_lease_seconds`가 미해결(`null`, `resolved = false`)인
+동안 재claim은 **전혀 일어나지 않고** 동작은 그 값이 없던 때와 완전히 같다 — 죽은 job은
+운영자가 볼 수 있게 `running`에 남는다. 값이 채워지면 마이그레이션 없이 켜진다.
+
+배포된 데이터베이스는 그 상태가 아니다. PASS 뒤 읽기 전용 확인에서 **linked 원격의 행은
+resolved 상태이고 값이 null이 아니다**(값 자체는 기록하지 않는다). 그래서 `v_lease`가
+채워진 쪽 — `make_interval(secs => v_lease)`와 `v_stale_before` 계산 — 은 06·07이 job을
+claim할 때 실제로 실행됐다. 반면 임대가 만료된 `running` job을 다시 집는 분기는 두
+시나리오가 그런 행을 만들지 않아 아직 고른 적이 없다. 즉 **기능은 켜져 있지만 회수가
+동작하는지는 확인되지 않았다.**
 
 `app.config_resolved_seconds()`가 이 값을 읽는데, `app.config_int`와 달리 `resolved`를
 요구하고 **쓸 수 없는 값은 없는 값으로 취급한다**(fail closed). 분수·범위 밖 값이면
@@ -493,6 +500,9 @@ service-role 전용 purge RPC를 실행할 수 없다.
 `app.config`에 `resolved = false`로 들어 있다. 마이그레이션 없이 값만 갱신할 수 있고,
 SQL 안에는 어떤 하드코딩도 없다.
 
+**"현재" 열은 시드가 넣는 값이다.** 배포된 데이터베이스가 그 뒤에 갱신됐을 수 있고, 실제로
+확인된 예외는 행에 적어 두었다. 확인하지 않은 행에 대해 이 표를 원격의 현재 상태로 읽지 말 것.
+
 | key | 현재 | 정해지지 않으면 |
 | --- | --- | --- |
 | `invite_ttl_seconds` | **null (미정)** | **커플 생성과 초대 코드 발급이 TW014로 실패한다** (`create_couple` / `reissue_couple_invite`). 다른 화면·조회는 정상. 최우선 |
@@ -501,7 +511,7 @@ SQL 안에는 어떤 하드코딩도 없다.
 | `invite_attempt_max` | 10 (임시) | 임시값으로 동작한다 |
 | `invite_attempt_window_seconds` | 600 (임시) | 임시값으로 동작한다 |
 | `purge_max_attempts` | 10 (임시) | 임시값으로 동작한다. null이면 무한 재시도 |
-| `purge_lease_seconds` | **null (미정)** | `running`에 멈춘 purge job을 다른 워커가 다시 집지 않는다. 프로세스가 죽어 사라진 job은 운영자가 손으로 처리해야 하므로, 24시간 SLA를 자동으로 지키려면 값이 필요하다 |
+| `purge_lease_seconds` | 시드는 null. **linked 원격은 resolved · non-null** (PASS 뒤 불리언 확인, 값은 기록하지 않음) | 값이 없는 환경에서는 `running`에 멈춘 purge job을 다른 워커가 다시 집지 않는다. 프로세스가 죽어 사라진 job은 운영자가 손으로 처리해야 하므로, 24시간 SLA를 자동으로 지키려면 값이 필요하다 |
 
 ```sql
 -- 값이 정해진 뒤 (예시) — invite_ttl_seconds는 런치 전 필수
@@ -553,13 +563,21 @@ update storage.buckets set file_size_limit = <bytes>, allowed_mime_types = array
    `v_segments[1] is distinct from v_couple_id::text`) — 09번 위조 시나리오가 이것들을
    직접 때린다.
 
-   남은 것 두 개는 스위트가 **구조적으로** 건드리지 않아서 아직 미확인이다.
+   남은 것은 스위트가 **구조적으로** 건드리지 않는 두 갈래다.
    - `storage.objects` 정책 안의 `objects.name` 참조: 스위트는 `visit_photos` 메타데이터
      행만 쓰고 storage 객체 자체는 만들지 않는다(파일 전체에 `storage.objects`가 없다).
-   - `claim_purge_jobs`의 `make_interval(secs => v_lease)`와 재claim `or` 분기:
-     `purge_lease_seconds`가 미설정이라 `v_lease`가 null이고, 함수가
-     `if v_lease is not null then`으로 감싸고 있어 그 분기에 진입하지 않는다. 8번 항목의
-     값이 정해진 뒤에야 실행된다.
+   - `claim_purge_jobs`에서 **임대 만료된 `running` job을 다시 claim하는 쪽**. `where`
+     절의 두 분기 중 `status = 'queued'`만 06·07의 갓 큐잉된 job과 매칭됐고,
+     `status = 'running' and started_at < v_stale_before` 분기는 평가만 되고 고를 행이
+     없었다 — 두 시나리오에 임대가 만료된 `running` job이 존재하지 않는다. 크래시한
+     워커를 서버가 회수하는 경로는 그래서 아직 실행된 적이 없다.
+
+     **`make_interval(secs => v_lease)` 자체는 실행됐다.** 이전 판에서 이 줄을 미실행으로
+     적은 것은 오류다 — 테스트 파일이 `purge_lease_seconds`를 설정하지 않는다는 것만 보고
+     `v_lease`가 null이라고 추론했는데, 그 값은 원격 `app.config` 행이 공급한다. PASS 뒤
+     읽기 전용 확인에서 그 행이 resolved 상태이고 값이 null이 아님이 불리언으로 확인됐으므로
+     (값 자체는 확인하지 않았다), `if v_lease is not null then` 안쪽과 `v_stale_before`
+     계산은 06·07이 job을 claim할 때 실제로 지나갔다.
 
    **로컬 스택이 생기면 `supabase db reset`(마이그레이션 적용)을 별도로 확인할 것.**
    원격에 스키마가 올라가 있다는 것과 마이그레이션이 처음부터 깨끗하게 적용된다는 것은
@@ -578,12 +596,15 @@ update storage.buckets set file_size_limit = <bytes>, allowed_mime_types = array
    받지 않는 것도 mock의 `saveFiveSecondRecord` 시그니처와 다르다.
 7. **`replenishPendingRecord()`는 mock 전용이다.** 실제 백엔드로 바꿀 때 함께 지운다
    (`CLAUDE.md`에 이미 적혀 있다).
-8. **`purge_lease_seconds`가 미설정이면 죽은 purge job이 자동 복구되지 않는다.**
-   워커가 봉투를 거부하는 경우는 이제 job 단위로 보고돼 재큐잉되지만, 프로세스 자체가
-   죽은 경우(크래시·함수 타임아웃)는 서버가 임대 만료로 알아채야 한다. 임대 기간이
-   명세에도 스키마에도 없어 임의로 정하지 않았으므로, 값이 정해지기 전까지 그런 job은
-   `running`에 남아 **운영자가 손으로 되돌려야 하고 24시간 SLA를 자동으로 지키지
-   못한다.** 값만 정하면 마이그레이션 없이 켜진다.
+8. **죽은 purge job의 자동 회수는 `purge_lease_seconds`에 달려 있고, 회수 경로 자체는
+   아직 실행된 적이 없다.** 워커가 봉투를 거부하는 경우는 job 단위로 보고돼 재큐잉되지만,
+   프로세스 자체가 죽은 경우(크래시·함수 타임아웃)는 서버가 임대 만료로 알아채야 한다.
+   시드는 이 값을 외부 게이트로 남겨 두었지만, PASS 뒤 읽기 전용 확인에서 **linked 원격의
+   행은 resolved 상태이고 값이 null이 아니다**(값 자체는 확인하지 않았다). 즉 그 데이터베이스
+   에서는 기능이 꺼져 있지 않다. 다만 3번 항목에 적은 대로 임대 만료된 `running` job을
+   다시 claim하는 분기는 통과한 시나리오가 만들어 내지 않았으므로, **회수가 실제로 동작하는지는
+   여전히 미확인이다.** 값이 없는 환경(로컬 스택, 새 프로젝트)에서는 그런 job이 `running`에
+   남아 운영자가 손으로 되돌려야 하고 24시간 SLA를 자동으로 지키지 못한다.
 9. **`app.config_int`는 여전히 분수 값에서 예외를 낸다.** W1에서 온 함수이고
    `(value #>> '{}')::integer`를 `jsonb_typeof = 'number'`만 보고 캐스트하므로,
    `invite_attempt_max`나 `purge_max_attempts`에 `10.5`가 들어가면 22P02가 난다. 지금

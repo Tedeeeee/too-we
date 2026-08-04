@@ -1365,8 +1365,10 @@ describe('database scenario tests are present as SQL', () => {
 
   it('declares a plan count equal to its top-level assertions', () => {
     // A wrong plan makes pgTAP report a bad run as good, or a good run as bad,
-    // and nothing else in this suite would notice. These scripts cannot be
-    // executed here, so this arithmetic is the only check they get.
+    // and nothing else in this suite would notice. The linked remote run is what
+    // actually verifies these scripts, but it does not happen on every commit —
+    // so between runs this arithmetic is the safeguard that catches an assertion
+    // added without its plan, before the next remote run would.
     const mismatched = [];
     for (const file of sqlTestFiles()) {
       const plan = sqlTestPlan(file);
