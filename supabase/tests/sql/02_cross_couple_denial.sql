@@ -82,8 +82,7 @@ set local role postgres;
 create temporary table leaked as
 select
   (select id from public.visits limit 1) as visit_id,
-  (select couple_id from public.couple_members where user_id = 'aaaaaaaa-0000-0000-0000-000000000001' limit 1) as couple_id,
-  (select code from public.couple_invites where status = 'consumed' limit 1) as used_code;
+  (select couple_id from public.couple_members where user_id = 'aaaaaaaa-0000-0000-0000-000000000001' limit 1) as couple_id;
 -- postgres owns this context table; authenticated needs read access to use it. Rolled back.
 grant select on leaked to authenticated;
 
@@ -115,9 +114,22 @@ select throws_ok(
   'a direct visit insert is refused, foreign couple id or not'
 );
 
+-- A terminal invite status is classified before the caller's own membership, so a
+-- consumed code answers invite_consumed and never reaches the conflict. What this
+-- assertion is about needs a code that is still live and belongs to someone else:
+-- B1's own active code, offered to a member of couple A.
+set local role postgres;
+select set_config(
+  'request.jwt.claims',
+  json_build_object('sub', 'aaaaaaaa-0000-0000-0000-000000000001', 'role', 'authenticated')::text,
+  true
+);
+select set_config('test.invite_code', (select code from public.couple_invites where status = 'active'), true);
+set local role authenticated;
+
 select is(
   (
-    public.join_couple_with_code((select used_code from leaked), 'req-b-steal') -> 'error' ->> 'code'
+    public.join_couple_with_code(current_setting('test.invite_code'), 'req-b-steal') -> 'error' ->> 'code'
   ),
   'active_membership_conflict',
   'a user who already has an active couple cannot join another'

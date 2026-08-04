@@ -152,16 +152,25 @@ select is(
 );
 
 -- Even a direct insert cannot exceed five, because ordinal is 1..5 and unique.
+--
+-- This one is about the table CHECK, and two things answer ahead of it: the row
+-- policy, and the BEFORE INSERT guard that rejects any path outside
+-- couple_id/visit_id/ for every role, postgres included. So the probe runs as
+-- postgres and carries a canonical path, leaving the constraint as the only thing
+-- left to refuse it. RLS on this table has its own assertions above and below.
+set local role postgres;
 select throws_ok(
   format(
     $$insert into public.visit_photos (visit_id, uploader_id, ordinal, storage_path)
-      values (%L, 'dddddddd-0000-0000-0000-000000000002', 6, 'x/y/z')$$,
-    (select visit_id from ctx)
+      values (%L, 'dddddddd-0000-0000-0000-000000000002', 6, %L)$$,
+    (select visit_id from ctx),
+    (select prefix from ctx) || 'p6.bin'
   ),
   '23514',
   null,
   'ordinal 6 violates the check constraint'
 );
+set local role authenticated;
 
 /* ---------- the shared reorder really moves a row ---------- */
 

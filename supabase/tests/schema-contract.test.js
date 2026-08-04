@@ -1423,11 +1423,14 @@ describe('database scenario tests are present as SQL', () => {
    */
   const statementRoles = (sql) => {
     let role = 'the temp login';
+    let subject = null;
     return parseSql(sql).map(({ code }) => {
       const text = code.replace(/\s+/g, ' ').trim();
       const set = /^set local role ([a-z_]+)$/i.exec(text);
       if (set) role = set[1];
-      return { text, role };
+      const claims = /request\.jwt\.claims[\s\S]*'sub'\s*,\s*'([0-9a-f-]+)'/i.exec(text);
+      if (claims) subject = claims[1];
+      return { text, role, subject };
     });
   };
 
@@ -1629,6 +1632,77 @@ describe('database scenario tests are present as SQL', () => {
       if (config === -1 || config > assertion) {
         wrong.push(`${file}: asserts at statement ${assertion} before writing app.config`);
       }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('reaches the membership conflict with a code that is still active', () => {
+    // join_couple_with_code classifies a terminal invite status *before* it looks at
+    // the caller's own membership, so a consumed code answers invite_consumed and
+    // the assertion never gets near what it is about. Reaching the conflict needs a
+    // live code from another couple, offered to someone who already has one.
+    const wrong = [];
+    for (const file of sqlTestFiles()) {
+      let capture = null;
+      const founders = new Set();
+      for (const { text, role, subject } of statementRoles(readSqlTest(file))) {
+        // Creating one counts, and so does joining one — but only a join that is not
+        // itself asserting an error, since a refused join leaves you with nothing.
+        const gainsCouple =
+          /public\.create_couple\s*\(/i.test(text) ||
+          (/join_couple_with_code/i.test(text) && !/->\s*'error'/.test(text));
+        if (gainsCouple && subject) founders.add(subject);
+        const cap = /^select set_config\s*\(\s*'test\.invite_code'\s*,\s*\(select .*?\)\s*,\s*true\s*\)$/i.exec(
+          text,
+        );
+        if (cap) {
+          capture = text;
+          continue;
+        }
+        if (!/join_couple_with_code/i.test(text) || !/active_membership_conflict/.test(text)) {
+          continue;
+        }
+        if (role !== 'authenticated') {
+          wrong.push(`${file}: membership conflict asserted as ${role}`);
+        }
+        if (/consumed|used_code/i.test(text)) {
+          wrong.push(`${file}: membership conflict is offered a consumed code`);
+        }
+        if (!capture || !/status = 'active'/i.test(capture)) {
+          wrong.push(`${file}: the code it offers is not an active capture`);
+        }
+        // A brand-new user would simply join, so the caller has to be someone who
+        // already holds a couple of their own.
+        if (!subject || !founders.has(subject)) {
+          wrong.push(`${file}: the caller holds no couple, so there is no conflict to hit`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('probes the ordinal check constraint with nothing else in the way', () => {
+    // The CHECK is the backstop *behind* the policy and the BEFORE INSERT object
+    // guard, and both of those answer first: the row policy refuses the write, and
+    // app.guard_visit_photo_object rejects any path outside couple_id/visit_id/ for
+    // every role, postgres included. So the probe has to run as postgres *and* carry
+    // a canonical path, or it reports someone else's refusal and never reaches 23514.
+    const wrong = [];
+    for (const file of sqlTestFiles()) {
+      const statements = statementRoles(readSqlTest(file));
+      statements.forEach(({ text, role }, i) => {
+        if (!/'23514'/.test(text)) return;
+        if (role !== 'postgres') wrong.push(`${file}: check probe runs as ${role}`);
+        if (!/prefix from \w+/i.test(text)) {
+          wrong.push(`${file}: check probe path is not the canonical visit folder`);
+        }
+        // Straight back, so the ownership and reorder work that follows — including
+        // the delete it asserts on — is still subject to RLS.
+        const next = statements[i + 1]?.text ?? '(end of file)';
+        if (!/^set local role authenticated$/i.test(next)) {
+          wrong.push(`${file}: check probe does not hand back to authenticated (${next.slice(0, 40)})`);
+        }
+      });
     }
     expect(wrong).toEqual([]);
   });
