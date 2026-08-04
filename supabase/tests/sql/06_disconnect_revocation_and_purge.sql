@@ -1,4 +1,6 @@
--- NOT EXECUTED IN THIS WORKSPACE. See supabase/README.md.
+-- Verified against the linked remote database on 2026-08-04:
+-- `npx supabase test db supabase/tests/sql --linked` -> all 9 files ok,
+-- Files=9, Tests=124, Result: PASS. See supabase/README.md.
 --
 -- Scenario: disconnect blocks both users immediately, queues one purge job that is
 -- claimable at once with a 24 hour completion target, and the job cannot be closed

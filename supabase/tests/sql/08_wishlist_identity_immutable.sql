@@ -1,4 +1,6 @@
--- NOT EXECUTED IN THIS WORKSPACE. See supabase/README.md.
+-- Verified against the linked remote database on 2026-08-04:
+-- `npx supabase test db supabase/tests/sql --linked` -> all 9 files ok,
+-- Files=9, Tests=124, Result: PASS. See supabase/README.md.
 --
 -- Security regression: both active members may edit shared wishlist content,
 -- but neither a browser client nor a raw REST update may rewrite the original

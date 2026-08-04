@@ -1,4 +1,6 @@
--- NOT EXECUTED IN THIS WORKSPACE. See supabase/README.md.
+-- Verified against the linked remote database on 2026-08-04:
+-- `npx supabase test db supabase/tests/sql --linked` -> all 9 files ok,
+-- Files=9, Tests=124, Result: PASS. See supabase/README.md.
 --
 -- Scenario: the invite lifecycle fails closed when its lifetime is unconfigured,
 -- and every rejection the client has to branch on is distinguishable — unknown,

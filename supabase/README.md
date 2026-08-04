@@ -12,31 +12,49 @@ supabase/
   tests/
     schema-contract.test.js                 Vitest — 실행되는 계약 테스트
     helpers/sql-contract.js                 마이그레이션 SQL 파서
-    sql/                                    pgTAP 시나리오 (이 워크스페이스에서 미실행)
+    sql/                                    pgTAP 시나리오 (2026-08-04 linked 원격에서 PASS)
 ```
 
-**마이그레이션 파일은 새 파일을 덧붙이지 않고 제자리에서 수정한다.** 이 마이그레이션은
-아직 어떤 환경에도 적용되지 않았고(원격 적용 금지) Codex 리뷰 → 통합 전이므로, 교정을
-별도 파일로 쌓으면 `expires_at`을 nullable로 만든 뒤 다시 not null로 바꾸는 식의
-의미 없는 이력만 남는다. 한 번이라도 적용된 뒤에는 이 방침이 바뀐다 — 그때부터는 반드시
-새 마이그레이션을 추가한다.
+**제자리 수정 방침은 끝났다 — 이제부터는 새 마이그레이션을 추가한다.** 원래 근거는
+"아직 어떤 환경에도 적용되지 않았다"였고, 그 전제가 2026-08-04에 깨졌다. pgTAP 스위트가
+linked 원격에서 통과했으므로 그 스위트가 건드리는 스키마·RPC·정책은 원격에 **이미 올라가
+있다.** 이 문서가 스스로 정한 전환 조건("한 번이라도 적용된 뒤에는 방침이 바뀐다")이
+충족된 것이므로, 지금 기존 파일을 제자리에서 고치면 원격 상태와 파일이 어긋난다.
+
+단, 이 증거가 말해 주는 것은 스위트가 실행한 객체가 존재한다는 것뿐이다. **모든
+마이그레이션이 깨끗하게 적용됐는지, `supabase db push`가 어떤 상태인지는 이 결과로
+알 수 없다** — 특히 두 번째 storage 파일은 아래 "남은 위험" 항목을 볼 것.
 
 ## 검증 상태 — 무엇이 실행됐고 무엇이 안 됐는지
 
 | 대상 | 상태 |
 | --- | --- |
-| `npm test -- supabase/tests/schema-contract.test.js` | **실행됨.** 98개 통과 |
-| `npm test` | **실행됨.** 전체 통과 |
-| `npm run build` | **실행됨.** 통과 |
+| `npx vitest run supabase/tests/schema-contract.test.js` | **실행됨.** 114개 통과 |
+| `npm test` | **실행됨.** 47개 파일 909개 통과 |
+| `npm run build` | **실행됨.** 통과 (500KB 청크 경고는 기존 사항, 빌드를 막지 않는다) |
 | `git diff --check` | **실행됨.** 통과 |
-| `supabase/tests/sql/*.sql` (pgTAP 7개) | **미실행.** Supabase CLI와 Docker 데몬이 이 워크스페이스에 없다 |
-| 원격 마이그레이션 적용 | **하지 않음.** 작업 범위에서 금지 |
+| `supabase/tests/sql/*.sql` (pgTAP 9개) | **실행됨 — PASS.** 2026-08-04 linked 원격, Files=9 / Tests=124 / failures=0 |
+| 로컬 `supabase db reset` | **하지 않음.** 이 워크스페이스에 로컬 스택이 없다 |
 
-pgTAP 스크립트는 작성됐지만 **한 번도 돌지 않았다.** 통과했다고 보고하지 않는다.
-각 파일 첫 줄에 `NOT EXECUTED IN THIS WORKSPACE` 주석이 붙어 있고, 계약 테스트가
-그 주석의 존재를 강제한다.
+pgTAP 스크립트는 2026-08-04에 linked 원격 데이터베이스에서 실제로 실행됐다.
 
-### pgTAP를 돌리는 방법 (환경이 생긴 뒤)
+```
+npx supabase test db supabase/tests/sql --linked
+→ 9개 파일 전부 ok,  Files=9  Tests=124  failures=0  Result: PASS
+```
+
+각 파일 첫 줄이 이 실행을 인용하고, 계약 테스트
+(`records the run that verified it, with the aggregate result`)가 날짜·`--linked`·
+집계 수치가 헤더에 남아 있는지 강제한다. 함께 있는
+`cites the run without naming the project or carrying a credential`은 그 헤더에
+project ref·호스트·토큰이 섞여 들어가지 않는지 본다.
+
+**이 결과가 증명하지 않는 것**을 같이 적어 둔다. 124개 단정이 통과했다는 것은 그
+단정들이 건드린 경로에 대한 증거일 뿐이다. 로컬 `supabase db reset`, 모든 마이그레이션의
+적용 상태, storage 버킷 준비, purge 워커 배포는 이 실행 범위 밖이고 여전히 미확인이다
+(아래 "남은 위험" 참고).
+
+### 로컬 스택에서 돌리는 방법
 
 ```bash
 docker info                 # 데몬이 떠 있어야 한다
@@ -54,9 +72,10 @@ supabase test db
 pgTAP 스크립트가 `insert into auth.users (...)`로 익명 사용자를 만드는데, 필요한 컬럼이
 Supabase auth 스키마 버전에 따라 다르다. 처음 돌릴 때 컬럼 목록을 맞춰야 할 수 있다.
 
-**`plan(n)`은 계약 테스트가 검산한다.** pgTAP 스크립트를 실행할 수 없으니 잘못된 plan
-숫자를 잡아 줄 것이 없다 — plan이 실제 단정 수보다 작으면 실패한 실행이 통과로 보이고,
-크면 정상 실행이 실패로 보인다. 그래서 `countPgTapPlan()`이 각 파일을 토큰 단위로 읽어
+**`plan(n)`은 계약 테스트가 검산한다.** plan이 실제 단정 수보다 작으면 실패한 실행이
+통과로 보이고, 크면 정상 실행이 실패로 보인다 — 원격에서 돌려 본 뒤에도 이 검산은 그대로
+필요하다. 스위트를 매 커밋마다 원격에 돌리지는 않으므로, 단정을 추가하면서 plan을 잊는
+실수를 잡아 주는 것은 여전히 이쪽이다. `countPgTapPlan()`이 각 파일을 토큰 단위로 읽어
 최상위 단정 호출 수를 세고 선언된 plan과 일치하는지 확인한다(문자열·달러 인용 안의
 `ok(` 같은 텍스트는 세지 않고, 들여쓴 호출은 놓치지 않는다). 카운터가 모르는 pgTAP 함수를
 쓰면 조용히 적게 세지 않고 그 자리에서 실패한다 — 새 단정 함수를 쓰면
@@ -86,7 +105,8 @@ pgbench -n -c 2 -j 2 -t 1 -f join.sql "$DB_URL"
 
 ## Vitest 계약 테스트가 검증하는 것
 
-Docker가 없으니 **실행되는** 가드는 마이그레이션 SQL에 대한 구조 계약이다.
+pgTAP는 원격에서 한 번 돌았지만 매 커밋마다 돌지는 않으므로, `npm test`에서 **항상**
+실행되는 가드는 여전히 마이그레이션 SQL에 대한 구조 계약이다.
 토큰 단위로 SQL을 파싱해서(달러 인용·문자열 인식, 함수 본문 안의 주석까지 제거)
 테이블·제약·인덱스·정책·함수·권한을 읽고 명세가 요구하는 항목을 확인한다.
 타우톨로지가 아니라는 것은 변이 테스트로 확인했다 — 아래를 각각 넣었을 때 모두 실패한다.
@@ -525,15 +545,25 @@ update storage.buckets set file_size_limit = <bytes>, allowed_mime_types = array
 2. **시도 제한이 사용자 단위다.** 익명 세션은 얼마든지 새로 만들 수 있어서, 세션을 계속
    갈아타는 공격자에게는 무력하다. IP나 디바이스 단위 제한은 이 레이어에서 불가능하다 —
    Edge Function이나 게이트웨이가 필요하다.
-3. **어떤 SQL도 실제 Postgres에서 실행되지 않았다.** Docker가 없어서 문법·타입 오류가
-   남아 있을 수 있다. 특히 확인 못 한 것: `('x' || hex)::bit(28)::integer` 캐스트,
-   `storage.objects` 정책 안의 `objects.name` 참조, `jsonb - text` 연산자를 쓰는
-   사진 컬럼 가드, `foreach ... in array tg_argv`, `string_to_array` 경로 분해.
-   W6에서 추가된 것 중 확인 못 한 것: `strpos(path, e'\\')` 백슬래시 검사,
-   `path ~ '[[:cntrl:]]'` 제어문자 클래스, `octet_length` 경로 상한,
-   `v_segments[1] is distinct from v_couple_id::text` uuid 텍스트 비교,
-   `claim_purge_jobs`의 `make_interval(secs => v_lease)`와 재claim `or` 분기.
-   **로컬 스택이 생기면 pgTAP보다 `supabase db reset`(마이그레이션 적용)을 먼저 돌릴 것.**
+3. **pgTAP가 커버하지 않은 경로는 여전히 실제로 실행된 적이 없다.** 2026-08-04 실행으로
+   해소된 것: 초대 코드 생성의 `('x' || hex)::bit(28)::integer` 캐스트, `jsonb - text`를
+   쓰는 사진 컬럼 가드, `foreach ... in array tg_argv`(wishlist 신원 가드),
+   `string_to_array` 경로 분해와 W6 경로 검사 전부(`strpos(path, e'\\')`,
+   `path ~ '[[:cntrl:]]'`, `octet_length` 상한,
+   `v_segments[1] is distinct from v_couple_id::text`) — 09번 위조 시나리오가 이것들을
+   직접 때린다.
+
+   남은 것 두 개는 스위트가 **구조적으로** 건드리지 않아서 아직 미확인이다.
+   - `storage.objects` 정책 안의 `objects.name` 참조: 스위트는 `visit_photos` 메타데이터
+     행만 쓰고 storage 객체 자체는 만들지 않는다(파일 전체에 `storage.objects`가 없다).
+   - `claim_purge_jobs`의 `make_interval(secs => v_lease)`와 재claim `or` 분기:
+     `purge_lease_seconds`가 미설정이라 `v_lease`가 null이고, 함수가
+     `if v_lease is not null then`으로 감싸고 있어 그 분기에 진입하지 않는다. 8번 항목의
+     값이 정해진 뒤에야 실행된다.
+
+   **로컬 스택이 생기면 `supabase db reset`(마이그레이션 적용)을 별도로 확인할 것.**
+   원격에 스키마가 올라가 있다는 것과 마이그레이션이 처음부터 깨끗하게 적용된다는 것은
+   다른 얘기다.
 4. **storage 정책 마이그레이션이 실패할 수 있다.** `storage.objects`에 정책을 만들려면
    그 테이블의 소유권이 필요하다. 마이그레이션 롤이 부족하면 두 번째 파일만 실패하고
    스키마는 남는다 — 그때는 대시보드 Storage Policies에서 같은 4개 정책을 넣는다.

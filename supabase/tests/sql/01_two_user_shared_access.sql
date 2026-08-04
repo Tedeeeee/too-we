@@ -1,7 +1,6 @@
--- NOT EXECUTED IN THIS WORKSPACE.
--- The Supabase CLI and the Docker daemon are unavailable here, so this pgTAP
--- script has never been run. Run it with `supabase test db` once a local stack
--- exists. See supabase/README.md.
+-- Verified against the linked remote database on 2026-08-04:
+-- `npx supabase test db supabase/tests/sql --linked` -> all 9 files ok,
+-- Files=9, Tests=124, Result: PASS. See supabase/README.md.
 --
 -- Scenario: two anonymous users in one active couple both read the shared visit
 -- and each other's entry, and both may edit the shared visit fields.

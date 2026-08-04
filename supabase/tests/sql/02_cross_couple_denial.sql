@@ -1,4 +1,6 @@
--- NOT EXECUTED IN THIS WORKSPACE. See supabase/README.md.
+-- Verified against the linked remote database on 2026-08-04:
+-- `npx supabase test db supabase/tests/sql --linked` -> all 9 files ok,
+-- Files=9, Tests=124, Result: PASS. See supabase/README.md.
 --
 -- Scenario: knowing an identifier from another couple grants nothing. Acceptance
 -- scenario 11 of the functional spec.
