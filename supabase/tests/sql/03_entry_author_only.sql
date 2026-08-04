@@ -36,9 +36,12 @@ select public.upsert_my_visit_entry((select id from public.visits limit 1), 'AÏù
 set local role postgres;
 
 select set_config('request.jwt.claims', json_build_object('sub', 'cccccccc-0000-0000-0000-000000000002', 'role', 'authenticated')::text, true);
+-- The joiner is not a member yet, so RLS hides the invite from them. Capture the
+-- code while postgres and hand it over transaction-locally.
+select set_config('test.invite_code', (select code from public.couple_invites where status = 'active'), true);
 set local role authenticated;
 select public.join_couple_with_code(
-  (select code from public.couple_invites where status = 'active'),
+  current_setting('test.invite_code'),
   'req-c-join',
   'C2'
 );

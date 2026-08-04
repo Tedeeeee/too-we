@@ -65,12 +65,15 @@ select set_config(
   json_build_object('sub', '22222222-2222-2222-2222-222222222222', 'role', 'authenticated')::text,
   true
 );
+-- The joiner is not a member yet, so RLS hides the invite from them. Capture the
+-- code while postgres and hand it over transaction-locally.
+select set_config('test.invite_code', (select code from public.couple_invites where status = 'active'), true);
 set local role authenticated;
 
 select ok(
   (
     public.join_couple_with_code(
-      (select code from public.couple_invites where status = 'active'),
+      current_setting('test.invite_code'),
       'req-join-1',
       '태식'
     ) -> 'ok'

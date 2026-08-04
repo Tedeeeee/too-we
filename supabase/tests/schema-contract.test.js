@@ -31,6 +31,7 @@ import {
   indexes,
   inserts,
   migrationFiles,
+  parseSql,
   policies,
   policiesFor,
   rawSql,
@@ -1406,6 +1407,30 @@ describe('database scenario tests are present as SQL', () => {
     'set local search_path = extensions, public, pg_catalog;',
   ];
 
+  /** Temp tables a scenario creates, by name. */
+  const tempTables = (file) =>
+    new Set(
+      [...readSqlTest(file).matchAll(/create\s+(?:temporary|temp)\s+table\s+(\w+)/gi)].map(
+        (m) => m[1],
+      ),
+    );
+
+  /**
+   * Top-level statements in execution order with the role in force for each.
+   *
+   * Statement level, not line level: a join call spans several lines, so the code
+   * argument and the call itself only appear together once the statement is whole.
+   */
+  const statementRoles = (sql) => {
+    let role = 'the temp login';
+    return parseSql(sql).map(({ code }) => {
+      const text = code.replace(/\s+/g, ' ').trim();
+      const set = /^set local role ([a-z_]+)$/i.exec(text);
+      if (set) role = set[1];
+      return { text, role };
+    });
+  };
+
   /**
    * The role in force for each statement line. Only `set local role` moves it, so
    * `reset role` shows up as the temp login the CLI connected with.
@@ -1465,18 +1490,26 @@ describe('database scenario tests are present as SQL', () => {
         if (hits.length !== 1) wrong.push(`${file}: ${hits.length} ${label} statements`);
       };
       once('search_path', /search_path/i);
-      once('grant', /^grant\b/i);
+      let pgtapGrants = 0;
       for (const line of lines) {
         if (/^alter\s+(role|user|database|default\s+privileges)\b/i.test(line)) {
           wrong.push(`${file}: ${line}`);
         }
-        // Only the pgTAP schema may be opened up, and only to get plan() resolved.
-        if (/^grant\b/i.test(line) && line !== 'grant usage on schema extensions to public;') {
-          wrong.push(`${file}: ${line}`);
-        }
         // Session-wide forms outlive the rollback and reach the next script.
         if (/^set\s+(role|session)\b/i.test(line)) wrong.push(`${file}: ${line}`);
+        if (!/^grant\b/i.test(line)) continue;
+        if (line === 'grant usage on schema extensions to public;') {
+          pgtapGrants += 1;
+          continue;
+        }
+        // The only other privilege a scenario may hand out is read access to one of
+        // its own pg_temp context tables, and only to a role the scenario switches
+        // into. A schema-qualified name cannot match here, so nothing in public or
+        // app is reachable, and neither is PUBLIC or anon.
+        const temp = /^grant select on (\w+) to (authenticated|service_role);$/.exec(line);
+        if (!temp || !tempTables(file).has(temp[1])) wrong.push(`${file}: ${line}`);
       }
+      if (pgtapGrants !== 1) wrong.push(`${file}: ${pgtapGrants} pgTAP schema grants`);
     }
     expect(wrong).toEqual([]);
   });
@@ -1511,6 +1544,90 @@ describe('database scenario tests are present as SQL', () => {
         if (/^(insert into auth\.|update app\.)/i.test(line) && role !== 'postgres') {
           wrong.push(`${file}: as ${role}: ${line.slice(0, 52)}`);
         }
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('acquires a join code as postgres, never under the joiner own RLS', () => {
+    // An unaffiliated joiner cannot see public.couple_invites — that is the RLS
+    // policy doing its job. Reading the code inside the join call therefore hands
+    // over NULL, the join quietly does not happen, and every later assertion in the
+    // scenario fails for a reason that has nothing to do with what it tests. The
+    // code has to be captured while postgres and passed in.
+    const wrong = [];
+    for (const file of sqlTestFiles()) {
+      let captured = false;
+      for (const { text, role } of statementRoles(readSqlTest(file))) {
+        if (/^select set_config\s*\(\s*'test\.invite_code'/i.test(text)) {
+          // Capturing it as the joiner reads the same NULL, so the move would be
+          // cosmetic. The capture itself is the part that has to be privileged.
+          if (role === 'postgres') captured = true;
+          else wrong.push(`${file}: captures the join code as ${role}`);
+          continue;
+        }
+        if (!/join_couple_with_code\s*\(/i.test(text)) continue;
+        if (role !== 'postgres' && /public\.couple_invites/i.test(text)) {
+          wrong.push(`${file}: joins as ${role} reading couple_invites`);
+        }
+        if (/current_setting\s*\(\s*'test\.invite_code'/i.test(text) && !captured) {
+          wrong.push(`${file}: uses test.invite_code with no postgres capture before it`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('grants each pg_temp context table to the role that reads it', () => {
+    // A temp table created by postgres is owned by postgres; authenticated reading
+    // it gets `permission denied for table`. The grant has to be explicit, narrow,
+    // and issued before the role switch that needs it.
+    const wrong = [];
+    for (const file of sqlTestFiles()) {
+      const owner = new Map();
+      const granted = new Map();
+      const seen = new Set();
+      for (const { text, role } of statementRoles(readSqlTest(file))) {
+        const created = /^create\s+(?:temporary|temp)\s+table\s+(\w+)/i.exec(text);
+        if (created) {
+          owner.set(created[1], role);
+          continue;
+        }
+        const grant = /^grant select on (\w+) to ([a-z_]+)$/i.exec(text);
+        if (grant) {
+          if (!owner.has(grant[1])) wrong.push(`${file}: grants ${grant[1]} before creating it`);
+          else granted.set(grant[1], (granted.get(grant[1]) ?? new Set()).add(grant[2]));
+          continue;
+        }
+        for (const [table, creator] of owner) {
+          if (!new RegExp(`\\b(from|join|update|into)\\s+${table}\\b`, 'i').test(text)) continue;
+          if (role === creator || granted.get(table)?.has(role)) continue;
+          const key = `${file}: ${role} reads ${table} (created by ${creator}) with no grant`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            wrong.push(key);
+          }
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('establishes the config it asserts on instead of trusting the project', () => {
+    // The linked project has the deferred operating values resolved, so a scenario
+    // that reads a lifetime off the production seed asserts against whatever the
+    // remote happens to hold. Every file must write the state it wants — inside the
+    // rolled-back transaction — before its first assertion.
+    const wrong = [];
+    for (const file of sqlTestFiles()) {
+      const statements = statementRoles(readSqlTest(file));
+      const assertion = statements.findIndex(({ text }) =>
+        /^select\s+(ok|is|isnt|throws_ok|lives_ok|is_empty)\s*\(/i.test(text),
+      );
+      const config = statements.findIndex(({ text }) => /^update app\.config\b/i.test(text));
+      if (assertion === -1) continue;
+      if (config === -1 || config > assertion) {
+        wrong.push(`${file}: asserts at statement ${assertion} before writing app.config`);
       }
     }
     expect(wrong).toEqual([]);

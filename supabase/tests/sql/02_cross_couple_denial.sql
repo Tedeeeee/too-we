@@ -43,9 +43,12 @@ set local role postgres;
 
 -- Second member of couple A, so the couple is full.
 select set_config('request.jwt.claims', json_build_object('sub', 'aaaaaaaa-0000-0000-0000-000000000002', 'role', 'authenticated')::text, true);
+-- The joiner is not a member yet, so RLS hides the invite from them. Capture the
+-- code while postgres and hand it over transaction-locally.
+select set_config('test.invite_code', (select code from public.couple_invites where status = 'active'), true);
 set local role authenticated;
 select public.join_couple_with_code(
-  (select code from public.couple_invites where status = 'active'),
+  current_setting('test.invite_code'),
   'req-a-join',
   'A2'
 );
@@ -81,6 +84,8 @@ select
   (select id from public.visits limit 1) as visit_id,
   (select couple_id from public.couple_members where user_id = 'aaaaaaaa-0000-0000-0000-000000000001' limit 1) as couple_id,
   (select code from public.couple_invites where status = 'consumed' limit 1) as used_code;
+-- postgres owns this context table; authenticated needs read access to use it. Rolled back.
+grant select on leaked to authenticated;
 
 set local role authenticated;
 

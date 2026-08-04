@@ -32,11 +32,14 @@ values
 
 /* ---------- fail closed while the lifetime is unconfigured ---------- */
 
+-- Do not read the deferred operating value off the project: the linked database
+-- has it resolved. Establish the unresolved state these assertions are about.
+update app.config set value = null, resolved = false where key = 'invite_ttl_seconds';
+
 select set_config('request.jwt.claims', json_build_object('sub', 'eeeeeeee-0000-0000-0000-000000000001', 'role', 'authenticated')::text, true);
 set local role authenticated;
 
--- The production seed ships invite_ttl_seconds unresolved, so nothing is
--- issuable until the external gate sets it.
+-- An unresolved lifetime refuses to issue, so no code exists to be found.
 select throws_ok(
   $$select public.create_couple('E1', null, 'req-e-unset')$$,
   'TW014',
@@ -84,6 +87,8 @@ create temporary table ctx as
 select
   (select couple_id from public.couple_members where user_id = 'eeeeeeee-0000-0000-0000-000000000001') as couple_id,
   (select code from public.couple_invites where status = 'active') as code;
+-- postgres owns this context table; authenticated needs read access to use it. Rolled back.
+grant select on ctx to authenticated;
 
 select isnt(
   (select expires_at from public.couple_invites where status = 'active'),
@@ -177,11 +182,14 @@ select ok((public.reissue_couple_invite('req-e-reissue') -> 'ok')::boolean, 'the
 set local role postgres;
 
 select set_config('request.jwt.claims', json_build_object('sub', 'eeeeeeee-0000-0000-0000-000000000002', 'role', 'authenticated')::text, true);
+-- The joiner is not a member yet, so RLS hides the invite from them. Capture the
+-- code while postgres and hand it over transaction-locally.
+select set_config('test.invite_code', (select code from public.couple_invites where status = 'active'), true);
 set local role authenticated;
 select ok(
   (
     public.join_couple_with_code(
-      (select code from public.couple_invites where status = 'active'),
+      current_setting('test.invite_code'),
       'req-e-join'
     ) -> 'ok'
   )::boolean,
@@ -192,11 +200,14 @@ set local role postgres;
 /* ---------- a full couple and a used code ---------- */
 
 select set_config('request.jwt.claims', json_build_object('sub', 'eeeeeeee-0000-0000-0000-000000000003', 'role', 'authenticated')::text, true);
+-- The joiner is not a member yet, so RLS hides the invite from them. Capture the
+-- code while postgres and hand it over transaction-locally.
+select set_config('test.invite_code', (select code from public.couple_invites where status = 'consumed' limit 1), true);
 set local role authenticated;
 select is(
   (
     public.join_couple_with_code(
-      (select code from public.couple_invites where status = 'consumed' limit 1),
+      current_setting('test.invite_code'),
       'req-e-third'
     ) -> 'error' ->> 'code'
   ),

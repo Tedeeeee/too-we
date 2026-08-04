@@ -52,6 +52,8 @@ select
 from public.wishlist_places w
 join public.couple_invites i on i.couple_id = w.couple_id and i.status = 'active'
 limit 1;
+-- postgres owns this context table; authenticated needs read access to use it. Rolled back.
+grant select on wishlist_identity_ctx to authenticated;
 
 /* ---------- B joins and may edit shared place content ---------- */
 

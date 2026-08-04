@@ -40,6 +40,8 @@ create temporary table ctx as
 select v.id as visit_id, v.couple_id as couple_id, v.couple_id::text || '/' || v.id::text || '/' as prefix
 from public.visits v
 limit 1;
+-- postgres owns this context table; authenticated needs read access to use it. Rolled back.
+grant select on ctx to authenticated;
 
 set local role authenticated;
 select is(
@@ -60,9 +62,12 @@ select public.register_visit_photo((select visit_id from ctx), (select prefix fr
 set local role postgres;
 
 select set_config('request.jwt.claims', json_build_object('sub', 'ffffffff-0000-0000-0000-000000000002', 'role', 'authenticated')::text, true);
+-- The joiner is not a member yet, so RLS hides the invite from them. Capture the
+-- code while postgres and hand it over transaction-locally.
+select set_config('test.invite_code', (select code from public.couple_invites where status = 'active'), true);
 set local role authenticated;
 select public.join_couple_with_code(
-  (select code from public.couple_invites where status = 'active'),
+  current_setting('test.invite_code'),
   'req-f-join',
   'F2'
 );

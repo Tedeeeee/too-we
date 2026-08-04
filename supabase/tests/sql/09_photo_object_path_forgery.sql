@@ -77,6 +77,8 @@ join public.couple_members m on m.couple_id = v.couple_id
 where m.user_id = '99999999-0000-0000-0000-000000000001'
   and m.left_at is null
 limit 1;
+-- postgres owns this context table; authenticated needs read access to use it. Rolled back.
+grant select on photo_path_ctx to authenticated;
 
 select set_config('request.jwt.claims', json_build_object('sub', '99999999-0000-0000-0000-000000000001', 'role', 'authenticated')::text, true);
 set local role authenticated;
