@@ -1378,4 +1378,70 @@ describe('database scenario tests are present as SQL', () => {
     expect(plan.unrecognised).toEqual(['col_is_unique']);
     expect(plan.counted).toBe(0);
   });
+
+  /* -- each script has to bring pgTAP's own visibility with it --------------- */
+
+  /**
+   * pgTAP is installed in the `extensions` schema, and a pg_prove login session
+   * does not inherit the visibility an interactive SQL console happens to have. A
+   * script that calls plan() first dies on statement one and reports zero
+   * assertions instead of a failure anyone can read, so every file must open with
+   * exactly these statements, in this order.
+   */
+  const BOOTSTRAP = [
+    'begin;',
+    'create extension if not exists pgtap with schema extensions;',
+    'set local search_path = extensions, public, pg_catalog;',
+  ];
+
+  /**
+   * Statement lines, with blanks and comments dropped. A mistake here makes the
+   * exact comparisons below fail rather than pass, so it needs no test of its own.
+   */
+  const codeLines = (sql) =>
+    sql
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('--'));
+
+  it('opens every scenario with the exact pgTAP bootstrap, in order', () => {
+    expect(sqlTestFiles().length).toBeGreaterThanOrEqual(9);
+    const wrong = [];
+    for (const file of sqlTestFiles()) {
+      const lines = codeLines(readSqlTest(file));
+      // Exact text and exact position, so a missing pg_catalog, a reordered or
+      // extra schema, and a session-wide SET in place of SET LOCAL all fail here.
+      if (lines.slice(0, 3).join(' ') !== BOOTSTRAP.join(' ')) {
+        wrong.push(`${file}: opens with ${lines.slice(0, 3).join(' ') || '(nothing)'}`);
+      } else if (!/^select plan\(\d+\);$/.test(lines[3] ?? '')) {
+        wrong.push(`${file}: statement 4 is ${lines[3] ?? '(nothing)'}, not select plan(n)`);
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('sets search_path nowhere else, so nothing outlives the rollback', () => {
+    // pg_prove reuses one connection for the whole file list, so a search_path
+    // that survives the rollback would decide what the next script resolves.
+    const wrong = [];
+    for (const file of sqlTestFiles()) {
+      const hits = codeLines(readSqlTest(file)).filter((l) => /search_path/i.test(l));
+      if (hits.length !== 1) wrong.push(`${file}: ${hits.length} search_path statements`);
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('keeps each scenario in one transaction it rolls back', () => {
+    const wrong = [];
+    for (const file of sqlTestFiles()) {
+      const lines = codeLines(readSqlTest(file));
+      const count = (re) => lines.filter((l) => re.test(l)).length;
+      if (count(/^begin;$/) !== 1) wrong.push(`${file}: ${count(/^begin;$/)} BEGIN`);
+      if (count(/^rollback;$/) !== 1) wrong.push(`${file}: ${count(/^rollback;$/)} ROLLBACK`);
+      if (count(/^commit\b/i) > 0) wrong.push(`${file}: commits instead of rolling back`);
+      if (lines.at(-1) !== 'rollback;') wrong.push(`${file}: ends with ${lines.at(-1)}`);
+    }
+    expect(wrong).toEqual([]);
+  });
 });

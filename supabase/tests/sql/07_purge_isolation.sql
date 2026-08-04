@@ -11,9 +11,12 @@
 -- un-rate-limited the user's *new* couple and wiped a name they had just entered.
 
 begin;
-select plan(15);
 
-create extension if not exists pgtap;
+-- A pg_prove session does not see pgTAP in the extensions schema on its own.
+create extension if not exists pgtap with schema extensions;
+set local search_path = extensions, public, pg_catalog;
+
+select plan(15);
 
 -- Test-only setup; see 04 for why this is not a default the migration invents.
 update app.config set value = to_jsonb(3600), resolved = true where key = 'invite_ttl_seconds';

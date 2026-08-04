@@ -6,9 +6,12 @@
 -- Acceptance scenario 9 of the functional spec.
 
 begin;
-select plan(17);
 
-create extension if not exists pgtap;
+-- A pg_prove session does not see pgTAP in the extensions schema on its own.
+create extension if not exists pgtap with schema extensions;
+set local search_path = extensions, public, pg_catalog;
+
+select plan(17);
 
 -- Test-only setup. The production seed leaves invite_ttl_seconds unresolved on
 -- purpose and app.issue_invite fails closed until it is set; resolving it inside

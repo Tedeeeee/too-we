@@ -5,9 +5,12 @@
 -- picker or move the row to another couple.
 
 begin;
-select plan(6);
 
-create extension if not exists pgtap;
+-- A pg_prove session does not see pgTAP in the extensions schema on its own.
+create extension if not exists pgtap with schema extensions;
+set local search_path = extensions, public, pg_catalog;
+
+select plan(6);
 
 -- Test-only setup. Couple creation fails closed until the invite lifetime is
 -- resolved, so this rolled-back scenario supplies a value without changing the

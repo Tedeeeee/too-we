@@ -11,9 +11,12 @@
 -- for the two-session pgbench recipe.
 
 begin;
-select plan(19);
 
-create extension if not exists pgtap;
+-- A pg_prove session does not see pgTAP in the extensions schema on its own.
+create extension if not exists pgtap with schema extensions;
+set local search_path = extensions, public, pg_catalog;
+
+select plan(19);
 
 insert into auth.users (id, instance_id, aud, role, is_anonymous)
 values

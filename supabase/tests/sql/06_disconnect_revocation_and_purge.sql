@@ -6,9 +6,12 @@
 -- Acceptance scenario 12 of the functional spec.
 
 begin;
-select plan(22);
 
-create extension if not exists pgtap;
+-- A pg_prove session does not see pgTAP in the extensions schema on its own.
+create extension if not exists pgtap with schema extensions;
+set local search_path = extensions, public, pg_catalog;
+
+select plan(22);
 
 -- Test-only setup; see 04 for why this is not a default the migration invents.
 update app.config set value = to_jsonb(3600), resolved = true where key = 'invite_ttl_seconds';
